@@ -1,0 +1,1080 @@
+/* macOS 风格外观层。
+ *
+ * 只覆盖视觉（圆角/材质/过渡/控件形态），**不改任何布局尺寸计算** ——
+ * 悬浮窗的宽高由 ResizeObserver 量内容后上报（D4），
+ * 若这里改动 padding/宽度会连带影响窗口尺寸，故一律不碰盒模型的关键量。
+ *
+ * 引入顺序必须在 styles.css 与 chart.css 之后。
+ */
+
+:root {
+  /* macOS Big Sur 之后的系统圆角梯度 */
+  --mac-r-sm: 6px;
+  --mac-r-md: 10px;
+  --mac-r-lg: 14px;
+  --mac-r-pill: 999px;
+
+  /* 系统语义色（暗色外观） */
+  --mac-accent: #0a84ff;
+  --mac-accent-hover: #409cff;
+  --mac-bg: #1e1e1e;
+  --mac-bg-elev: #2a2a2c;
+  --mac-sep: rgba(var(--c-white-rgb), 0.11);
+  --mac-label: #f5f5f7;
+  --mac-label-2: rgba(235, 235, 245, 0.6);
+  --mac-label-3: rgba(235, 235, 245, 0.32);
+
+  /* 统一过渡：macOS 的动效偏短且带缓出 */
+  --mac-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --mac-dur: 180ms;
+}
+
+/* ── 悬浮窗：更圆的角 + 细高光边
+ *
+ * 这里**不**加重 backdrop-filter，原因有两条：
+ * ① 透明窗口里 backdrop-filter 采不到桌面 —— 它只能采样同一合成上下文内的页面
+ *    内容，而这层背后就是透明的页面底，所以"毛玻璃虚化桌面"在 WebView2 的透明
+ *    窗口上根本不会出现（原有的 blur(2px) 同理，基本是装饰性的）。
+ * ② 本机在本项目期间出现过 4 次无法归因的意外关机。给一个常驻置顶的透明窗口
+ *    叠大范围 blur + saturate 会持续占用 GPU 合成，这个风险不值得为一个大概
+ *    render 不出来的效果去冒。
+ * 观感改由「实色半透明底 + 大圆角 + 细高光边 + 投影」承担，这些都是廉价的。
+ */
+.bg-layer {
+  border-radius: var(--mac-r-lg) !important;
+  /* 顶部一道内高光 + 外阴影，是 macOS 悬浮面板的典型层次 */
+  box-shadow:
+    inset 0 1px 0 rgba(var(--c-white-rgb), 0.12),
+    0 1px 3px rgba(0, 0, 0, 0.28) !important;
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14) !important;
+}
+
+.row {
+  border-radius: var(--mac-r-sm);
+  transition: background-color var(--mac-dur) var(--mac-ease),
+    opacity var(--mac-dur) var(--mac-ease);
+}
+
+.row:hover {
+  background: rgba(var(--c-white-rgb), 0.06);
+}
+
+/* ── 窗口通用：设置窗与大图窗 */
+.settings,
+.settings-body,
+.chart-app,
+.chart-body {
+  background: var(--mac-bg);
+  color: var(--mac-label);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 分段控件（Segmented Control）：macOS 的 Tab 就是这个形态 */
+.tabs,
+.chart-tabs {
+  gap: 2px;
+  padding: 2px;
+  background: rgba(var(--c-white-rgb), 0.06);
+  border-radius: var(--mac-r-md);
+}
+
+.tabs button,
+.chart-tabs .tab {
+  border: none !important;
+  border-radius: 8px !important;
+  padding: 5px 14px !important;
+  font-size: 12px;
+  color: var(--mac-label-2);
+  background: transparent !important;
+  transition: background-color var(--mac-dur) var(--mac-ease),
+    color var(--mac-dur) var(--mac-ease);
+}
+
+.tabs button:hover,
+.chart-tabs .tab:hover {
+  color: var(--mac-label);
+  background: rgba(var(--c-white-rgb), 0.05) !important;
+}
+
+/* 原样式的选中态是"底部一条蓝色下划线"（.tab-active 设 border-bottom-color）。
+   分段控件不用描边表达选中，故连带把下划线关掉。 */
+.tabs .tab-active,
+.tabs button[aria-selected="true"],
+.chart-tabs .tab.active {
+  color: var(--mac-label) !important;
+  /* 选中态是"浮起的白片"，不是描边 */
+  background: rgba(var(--c-white-rgb), 0.16) !important;
+  border-bottom-color: transparent !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+}
+
+/* ── 卡片/分组：macOS 设置面板的分组盒 */
+.card,
+fieldset.card {
+  border: 0.5px solid var(--mac-sep);
+  border-radius: var(--mac-r-md);
+  background: var(--mac-bg-elev);
+  padding: 12px 14px;
+}
+
+legend {
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--mac-label-2);
+}
+
+/* ── 按钮：胶囊 + 轻微按压反馈 */
+button,
+.chart-refresh,
+.ar-gen,
+.chart-err button {
+  border-radius: var(--mac-r-sm);
+  border: 0.5px solid var(--mac-sep);
+  background: rgba(var(--c-white-rgb), 0.08);
+  color: var(--mac-label);
+  transition: background-color var(--mac-dur) var(--mac-ease),
+    transform var(--mac-dur) var(--mac-ease);
+}
+
+button:hover,
+.chart-refresh:hover,
+.ar-gen:hover:not(:disabled) {
+  background: rgba(var(--c-white-rgb), 0.14);
+}
+
+button:active {
+  /* macOS 的按压是"轻微内缩"而不是变色 */
+  transform: scale(0.97);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 原样式里这几个按钮各自声明了 background/border（特异性高于上面的裸 button
+   选择器，故形态得以保留），只把圆角对齐到 macOS 的梯度。 */
+.wr-remove,
+.chart-refresh,
+.dc-submit,
+.text-input {
+  border-radius: var(--mac-r-sm) !important;
+}
+
+/* ── 开关：macOS 的 Switch 形态（不是方框勾选） */
+.row-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  cursor: pointer;
+}
+
+/* .check 是原有的勾选框容器（外观/窗口页在用），.row-switch 是提醒页新增的。
+   两者统一成 macOS 的 Switch。 */
+.row-switch input[type="checkbox"],
+.check input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 38px;
+  height: 22px;
+  margin: 0;
+  border-radius: var(--mac-r-pill);
+  background: rgba(var(--c-white-rgb), 0.16);
+  transition: background-color var(--mac-dur) var(--mac-ease);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+/* 旋钮与选中态**必须和上面的底座同选择器**。
+ * 2026-08-29 用户报"窗口置顶这些选中后没有蓝色填充"，根因就在这：
+ * 底座那条写了 `.row-switch, .check` 两个类，而旋钮和 :checked 只写了 `.row-switch`。
+ * 结果窗口页/外观页（用 .check）渲染成一个 38×22 的空胶囊 ——
+ * 没有白色圆珠、勾选后也不变蓝，用户完全看不出有没有选中。
+ * 加 .check 后两处共用同一套开关观感。 */
+.row-switch input[type="checkbox"]::after,
+.check input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: transform var(--mac-dur) var(--mac-ease);
+}
+
+.row-switch input[type="checkbox"]:checked,
+.check input[type="checkbox"]:checked {
+  background: var(--mac-accent);
+}
+
+.row-switch input[type="checkbox"]:checked::after,
+.check input[type="checkbox"]:checked::after {
+  transform: translateX(16px);
+}
+
+/* ── 滑块：细轨 + 圆珠 */
+input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  height: 4px;
+  border-radius: var(--mac-r-pill);
+  background: rgba(var(--c-white-rgb), 0.18);
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  cursor: pointer;
+  transition: transform var(--mac-dur) var(--mac-ease);
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(1.15);
+}
+
+/* ── 输入框：圆角 + 聚焦光环（macOS 的 focus ring） */
+input[type="text"],
+input[type="number"],
+input[type="search"] {
+  border-radius: var(--mac-r-sm);
+  border: 0.5px solid var(--mac-sep);
+  background: rgba(var(--c-white-rgb), 0.06);
+  color: var(--mac-label);
+  padding: 5px 8px;
+  transition: border-color var(--mac-dur) var(--mac-ease),
+    box-shadow var(--mac-dur) var(--mac-ease);
+}
+
+/* ── number input 的上下微调箭头：彻底移除，改用滚轮增减
+ *
+ * 诉求演进（五版，别再走回头路）：
+ * v1 原生态             → "白色箭头太突兀"
+ * v2 opacity:.28        → "上下白色还是存在"（压暗≠不白）
+ * v3 display:none       → "要求的是有箭头可设，但不要白色"（删掉≠改色）
+ * v4 filter:invert(1)   → "箭头有黑色背景"（invert 连底一起翻，见下）
+ * v5 scale+opacity      → "箭头有黑色背景，白色箭头小一点"
+ * v6（现在）             → **删箭头 + 滚轮增减**：不要图形按钮，滚轮能调就行
+ *
+ * v4 的黑底成因（值得记）：原生 spinner 在深色主题下是浅箭头 + 透明底。
+ * `invert(1)` 作用于**整个伪元素**，箭头浅→深的同时底也从透明翻成亮色，
+ * 再被 brightness 压暗就成了黑块。没法只翻箭头不翻底，这条路本身错。
+ *
+ * v6 不再纠缠外观：箭头整个去掉，增减能力由 JS 侧的 wheel 事件提供
+ * （见 components/settings/NumberInput.tsx）。这样既没有任何视觉噪声，
+ * 又保留了"不用键盘也能微调"的手感。
+ *
+ * 约束（五版都没变）：`::-webkit-*-spin-button` 是原生控件伪元素，
+ * Chromium 内部绘制，`color`/`fill`/`background` 对它全部无效。 */
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: none;
+  margin: 0;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--mac-accent);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.3);
+}
+
+input::placeholder {
+  color: var(--mac-label-3);
+}
+
+/* ── 列表项（自选股、大图窗侧栏、搜索结果） */
+.watch-row,
+.side-item,
+.search-item {
+  border-radius: var(--mac-r-sm);
+  transition: background-color var(--mac-dur) var(--mac-ease);
+}
+
+/* .search-item / .watch-row 原样式已有 :hover 背景（特异性同级但在后加载的本表里
+   会被下面的规则覆盖），这里只给没有 hover 态的侧栏项补上 */
+.side-item:hover {
+  background: rgba(var(--c-white-rgb), 0.07);
+}
+
+.side-item.active {
+  background: rgba(10, 132, 255, 0.22) !important;
+  border-color: transparent !important;
+}
+
+/* ── 滚动条：macOS 的细覆盖式滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+/* 滑块颜色**必须走 token**，不能硬编码 rgba(255,255,255,…)。
+   浅色主题靠 `--c-white` / `--c-black` 互换来适配所有"白色低透明度"元素，
+   硬编码的值不参与互换 —— 2026-08-30 用户报"切白天模式后滚动条还是白色
+   不好区分"就是这里（chart.css / styles.css 那两处用的是 token，正常适配，
+   只有这条全局规则是硬编码的）。 */
+::-webkit-scrollbar-thumb {
+  background: rgba(var(--c-white-rgb), 0.22);
+  border-radius: var(--mac-r-pill);
+  /* 用透明边框把滑块收窄，是 macOS 覆盖式滚动条的做法 */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--c-white-rgb), 0.34);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 尺寸测量层（D4）
+   ResizeObserver 观察的就是这一层，它必须同时含内容层与卡片栈。
+   自身不设 padding/border/margin：测得的 borderBox 要正好等于两者的并集，
+   多出任何一像素都会变成窗口边缘的空隙。 */
+.measure {
+  position: relative;
+  z-index: 1;
+  width: max-content;
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+
+/* 原先这里有悬浮窗内提醒卡片的整套样式（.alert-stack / .alert-card /
+   .ac-* / .alert-more / mac-notify-in，约 90 行）。
+   提醒改由屏幕中心独立弹窗承担（popup.css）后，组件 AlertCard.tsx 与
+   这批样式都成了死代码，一并删除。牛熊表情图标随之消失。 */
+
+/* ── 逐股规则行 */
+.alert-rule {
+  padding: 9px 0;
+  border-bottom: 0.5px solid var(--mac-sep);
+}
+
+.alert-rule:last-child {
+  border-bottom: none;
+}
+
+.ar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.ar-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ar-code {
+  font-size: 10px;
+  color: var(--mac-label-3);
+}
+
+.ar-price {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--mac-label-2);
+}
+
+.ar-gen {
+  margin-left: auto;
+  padding: 3px 9px !important;
+  font-size: 11px;
+}
+
+.ar-inputs {
+  display: grid;
+  /* 五列（基准价 + 上下目标价 + 涨跌幅）。
+   *
+   * 用 auto-fit 而非 `repeat(5, 1fr)`：设置窗 minWidth 是 460px，
+   * 硬切五等份时每列只剩 ~74px，装完数字再加原生 spinner 就开始挤。
+   * auto-fit + minmax 让它在窄窗口下自动折成两行，而不是把每列压瘦。 */
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: 7px;
+}
+
+.ar-inputs label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--mac-label-2);
+  min-width: 0;
+}
+
+.ar-inputs input {
+  width: 100%;
+  font-size: 11px;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.pair label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--mac-label-2);
+}
+
+.inline-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--mac-label);
+}
+
+.inline-input input {
+  width: 62px;
+}
+
+.row-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-size: 11px;
+  color: var(--mac-label-2);
+}
+
+.row-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ── 日/月主题切换按钮（Tab 栏右端）
+ *
+ * `margin-left: auto` 把它推到 Tab 栏最右边 —— 用它而不是给 .tabs 加
+ * `justify-content: space-between`，因为后者会连带改变 Tab 之间的间距。
+ *
+ * 尺寸与 Tab 高度对齐（28px），否则会把 Tab 栏顶高一两个像素。 */
+/* ⚠️ **选择器必须比 `.tabs button` 更特异，且要对等使用 !important。**
+ *
+ * 本文件上方（约 81 行）有 `.tabs button { padding: 5px 14px !important;
+ * background: transparent !important; }` —— 那是给 Tab 做分段控件外观的。
+ * 主题按钮也是 `.tabs` 里的 `<button>`，会被同一条规则命中。
+ *
+ * 2026-08-30 第一版写成 `.theme-toggle { padding: 0; ... }` 放在文件更后面，
+ * 结果**图标完全看不见**：`!important` 不看加载顺序，后写也赢不了。
+ * 用户报"没看到图标"就是这个。
+ *
+ * 现在用 `.tabs .theme-toggle`（两个类，特异性高于 `.tabs button`）
+ * 并对等加 `!important`，才能真正覆盖。 */
+.tabs .theme-toggle {
+  margin-left: auto !important;
+  /* 顶住宽度：Tab 栏是 flex，不写 flex-basis 时图标按钮可能被压扁到看不见 */
+  flex: 0 0 28px !important;
+  min-width: 28px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: var(--mac-r-pill) !important;
+  background: transparent !important;
+  /* SVG 用 currentColor 描边，所以这里定色就等于定图标颜色。
+     取 --mac-label（最亮的一级）而不是 label-2：它是个操作入口，
+     不该比正文还淡 */
+  color: var(--mac-label) !important;
+  cursor: pointer;
+  transition:
+    background-color var(--mac-dur) var(--mac-ease),
+    color var(--mac-dur) var(--mac-ease);
+}
+
+.tabs .theme-toggle:hover:not(:disabled) {
+  background: rgba(var(--c-white-rgb), 0.12) !important;
+}
+
+.tabs .theme-toggle:disabled {
+  opacity: 0.35 !important;
+  cursor: default;
+}
+
+/* 图标自身不接收指针事件：否则 hover 在 svg 与 button 之间来回跳，
+   背景会闪。 */
+.theme-toggle svg {
+  pointer-events: none;
+}
+
+/* ── 设置页「预览弹窗效果」行。
+   放在 macos.css 而不是 popup.css：设置窗只 import styles/macos 两份，
+   写进 popup.css 的规则在设置窗里根本不会加载。 */
+.demo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.demo-popup-btn {
+  flex: 0 0 auto;
+}
+
+.row-slider em {
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  color: var(--mac-label);
+  min-width: 38px;
+  text-align: right;
+}
+
+.hint {
+  margin: 7px 0 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--mac-label-3);
+}
+
+/* 分组容器禁用时整体压暗（提醒总开关关闭的表现） */
+fieldset[disabled] {
+  opacity: 0.42;
+}
+
+/* ── 小图悬停读数（悬浮窗内，鼠标停在分时曲线上时显示该刻数值）
+ *
+ * `position: absolute` 是硬要求，不是排版偏好：这一层若进常规流会撑大
+ * `.measure`，触发 D4 的尺寸上报，悬浮窗宽高会随鼠标移动而抖动。
+ * 同理不设 margin，只用 transform 微调位置。
+ */
+.mc-readout {
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--mac-r-sm);
+  background: rgba(28, 28, 30, 0.92);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.mc-t {
+  color: var(--mac-label-2);
+}
+
+.mc-p {
+  font-weight: 600;
+}
+
+.mc-c {
+  font-size: 9px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * 设置窗：真毛玻璃 + 丝滑动效
+ *
+ * # 为什么这里可以用 backdrop-filter，而悬浮窗不行
+ *
+ * 本文件开头（悬浮窗那节）写明了不加重 blur 的两条理由，两条在这里都不成立：
+ *
+ * ① 采样源：backdrop-filter 只能采样**同一合成上下文内**的页面内容。
+ *    悬浮窗是 transparent(true)，面板背后是透明的页面底 —— 没东西可采，
+ *    所以那里的 blur 是纯装饰。设置窗是 transparent(false) 的**不透明**窗口，
+ *    只要它自己身上有可采样的内容（见下面的 aurora 层），blur 就真的会出效果。
+ * ② GPU 风险：那条针对的是"常驻置顶、一直挂在桌面上"的悬浮窗。
+ *    设置窗是用完就关（且关闭即隐藏）的临时窗口，不构成持续负载。
+ *
+ * # 关键：blur 需要有东西可虚化
+ *
+ * 在纯色 #171717 上叠 backdrop-filter 什么都看不出来 —— 均匀色虚化后还是同一个色。
+ * 所以必须先铺一层有色彩起伏的底（.settings::before 的三团光斑），
+ * 面板浮在它上面才有"透过毛玻璃看到背后颜色晕开"的观感。
+ * ═══════════════════════════════════════════════════════════════════ */
+
+.settings-body {
+  /* 底色压深一点，让上面的光斑更透得出来。
+     中性灰（R=G=B），不带蓝味 —— 见本文件顶部「去蓝」说明。 */
+  background: #171717 !important;
+}
+
+/* 提醒页卡片间距比通用面板再宽一档（2026-08-29 用户报"全局默认阈值和上一块太近"）。
+   通用 .panel 是 gap:10px，四块卡片各自有 12px 内边距，视觉上两块之间只隔 10px
+   却各带 12px 留白，读起来像"挤在一起的两段"而不是两个独立分组。
+   只加在提醒页：它是唯一有 4 个并列 card 的面板，其余面板卡片少、10px 够用。 */
+.settings-body .alert-panel {
+  gap: 18px;
+}
+
+/* ── 极光底：blur 的采样源 */
+.settings {
+  position: relative;
+  background: transparent !important;
+  /* 光斑用 ::before 绝对定位铺满，故这里要成为它的定位父级 */
+  isolation: isolate;
+}
+
+/* 三团大范围径向渐变。**这层是整个毛玻璃效果的前提** ——
+   没有它，上面的 backdrop-filter 虚化的是一块均匀色，等于什么都没做。 */
+.settings::before {
+  content: "";
+  /* fixed 而不是 absolute：absolute + inset:-20% 会溢出容器并把溢出量算进
+     可滚动区域，表现是设置窗多出一条无内容的滚动条。
+     按 CSS 规范 fixed 定位元素**不参与可滚动溢出**，所以放大/漂移都不会产生滚动条。
+     副作用是它不随内容滚动 —— 对"背景光晕"恰好是想要的行为。 */
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  /* 中性白灰光晕（R=G=B），只给亮度起伏、不带色相 —— blur 仍有东西可采样。
+   *
+   * alpha 调整史（这三个数是毛玻璃效果的命门，改前先读完）：
+   * 原蓝紫青三层是 .18~.30。2026-08-29 去蓝时换成白灰并降到 .05~.07，
+   * 理由是"白光在深底上同 alpha 更亮，照原值会糊成白斑"。
+   * 那个顾虑对，但降过头了：卡片自己是 rgba(var(--c-white-rgb), .055)，
+   * 光斑降到同一量级后**采样源和卡片几乎同亮度** —— 虚化一块均匀色等于没虚化，
+   * 用户随即报"设置没有毛玻璃的感觉"。
+   *
+   * 现在取 .16/.14/.11：比卡片的 .055 高出 2~3 倍拉开层次，
+   * 又低于原蓝紫层的 .18~.30 避免糊成白斑。中间值，两头的坑都躲开。 */
+  background:
+    radial-gradient(38% 42% at 18% 12%, rgba(var(--c-white-rgb), 0.16), transparent 68%),
+    radial-gradient(42% 46% at 84% 26%, rgba(var(--c-white-rgb), 0.14), transparent 70%),
+    radial-gradient(46% 40% at 50% 96%, rgba(var(--c-white-rgb), 0.11), transparent 72%);
+  /* 缓慢漂移，让"丝滑"体现在静止时也有呼吸感。
+     只动 transform（合成层属性），不触发重排/重绘，代价很低。 */
+  animation: mac-aurora 42s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes mac-aurora {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(2.5%, -2%, 0) scale(1.06);
+  }
+  100% {
+    transform: translate3d(-2%, 2.5%, 0) scale(1.03);
+  }
+}
+
+/* ── Tab 栏：吸顶毛玻璃。内容从它下面滑过时会被虚化，这是 macOS 工具栏的观感 */
+.settings-body .tabs {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  margin: 8px 10px 0;
+  padding: 3px !important;
+  background: rgba(var(--c-white-rgb), 0.07) !important;
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.13);
+  border-radius: var(--mac-r-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+}
+
+/* 选中的 Tab 用"浮起的玻璃片"，配合 transform 过渡让切换有推移感 */
+.settings-body .tabs .tab-active,
+.settings-body .tabs button[aria-selected="true"] {
+  background: rgba(var(--c-white-rgb), 0.20) !important;
+  box-shadow:
+    inset 0 0.5px 0 rgba(var(--c-white-rgb), 0.28),
+    0 2px 6px rgba(0, 0, 0, 0.26);
+}
+
+.settings-body .tabs button {
+  /* 加上 transform 让按压有回弹，纯色变化会显得僵硬 */
+  transition:
+    background-color 220ms var(--mac-ease),
+    color 220ms var(--mac-ease),
+    transform 220ms var(--mac-ease);
+}
+
+.settings-body .tabs button:active {
+  transform: scale(0.96);
+}
+
+/* ── 面板容器：滚动惯性 + 切换入场动画 */
+.settings-body .tab-panel {
+  scroll-behavior: smooth;
+  animation: mac-panel-in 320ms var(--mac-ease) both;
+}
+
+/* 切 Tab 时整块轻微上移淡入。
+   靠 React 侧给 .tab-panel 加 key={tab} 让节点重建，动画才会重放 ——
+   不换 key 的话 React 复用同一个 DOM 节点，animation 只在首次挂载时跑一次。 */
+@keyframes mac-panel-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* ── 卡片：半透明玻璃 + 悬停微浮起 */
+.settings-body .card,
+.settings-body fieldset.card,
+.settings-body .search-box,
+.settings-body .direct-code-box,
+.settings-body .watch-list {
+  background: rgba(var(--c-white-rgb), 0.055) !important;
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.12) !important;
+  border-radius: var(--mac-r-md) !important;
+  box-shadow:
+    inset 0 0.5px 0 rgba(var(--c-white-rgb), 0.10),
+    0 2px 10px rgba(0, 0, 0, 0.18);
+  transition:
+    background-color 240ms var(--mac-ease),
+    box-shadow 240ms var(--mac-ease),
+    transform 240ms var(--mac-ease);
+}
+
+/* 搜索框/直接输码框原本是裸的 flex 容器，给它们补上内边距才像卡片 */
+.settings-body .search-box,
+.settings-body .direct-code-box {
+  padding: 11px 13px;
+}
+
+/* 直接输码框上边那条分隔线在玻璃卡片里就多余了 */
+.settings-body .direct-code-box {
+  margin-top: 10px;
+  border-top: none !important;
+  padding-top: 11px;
+}
+
+.settings-body .card:hover,
+.settings-body .search-box:hover,
+.settings-body .direct-code-box:hover {
+  background: rgba(var(--c-white-rgb), 0.075) !important;
+  box-shadow:
+    inset 0 0.5px 0 rgba(var(--c-white-rgb), 0.14),
+    0 6px 20px rgba(0, 0, 0, 0.26);
+}
+
+/* ── 列表行
+ *
+ * ⚠️ **这里刻意没有入场动画。** 曾经有过（`mac-row-in` + 逐行 40ms 错峰、
+ * 最长到 320ms），但它造成了用户报的"拖动不灵敏、按住鼠标移动不生效"：
+ *
+ * 动画用 translate3d 位移元素，而位移期间浏览器的**命中测试位置**与
+ * **视觉位置**不一致 —— 用户看到行在那里，按下去抓到的是空气。
+ * 错峰又让这个窗口长达 320ms，且每次列表重渲染（改配置、刷新名称）都重放一遍，
+ * 所以症状是**间歇性**的：手快就抓不到，手慢就正常。这正是"有时不生效"的由来。
+ *
+ * 列表行是**交互元素**（可拖拽），观感上的锦上添花不值得牺牲可操作性。
+ * 卡片、Tab 面板那些非拖拽元素的入场动画保留。
+ *
+ * 保留 transition 用于 hover/拖拽态的平滑过渡 —— transition 只在
+ * 属性真正变化时生效，不像 animation 那样在挂载后无条件跑一段位移。
+ */
+.settings-body .watch-row {
+  transition:
+    background-color 200ms var(--mac-ease),
+    opacity 200ms var(--mac-ease);
+}
+
+/* 拖拽排序的视觉反馈 */
+.settings-body .watch-row.dragging {
+  opacity: 0.45;
+  transform: scale(0.985);
+}
+
+.settings-body .watch-row.drag-over {
+  /* 用一条蓝线指示落点，比整行变色更准确 */
+  box-shadow: inset 0 2px 0 var(--mac-accent);
+}
+
+/* ── 搜索结果：出现时淡入，不要突然弹出 */
+.settings-body .search-results {
+  animation: mac-panel-in 240ms var(--mac-ease) both;
+  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(var(--c-white-rgb), 0.10) !important;
+}
+
+/* ── 大盘窗：同一套材质，保持两个窗口观感一致 */
+.market-body {
+  background: #171717 !important;
+}
+
+.market-app {
+  position: relative;
+  isolation: isolate;
+}
+
+.market-app::before {
+  content: "";
+  /* 同 .settings::before：必须 fixed。
+     大盘窗更要紧 —— 它是整页滚动（没有内层滚动容器），
+     用 absolute 溢出会直接把页面撑长一截，滚到底是一片空白。 */
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  /* 同为中性白灰光晕。原先靠色相（青绿 vs 蓝紫）区分两窗，去蓝后色相都归零，
+     区分改由光斑位置/尺寸/动画周期承担（本就与设置窗不同）。 */
+  background:
+    radial-gradient(40% 44% at 14% 10%, rgba(var(--c-white-rgb), 0.06), transparent 68%),
+    radial-gradient(44% 46% at 88% 22%, rgba(var(--c-white-rgb), 0.06), transparent 70%),
+    radial-gradient(46% 42% at 46% 98%, rgba(var(--c-white-rgb), 0.045), transparent 72%);
+  animation: mac-aurora 46s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+.market-app .idx-card,
+.market-app .fl-headline {
+  background: rgba(var(--c-white-rgb), 0.06) !important;
+  backdrop-filter: blur(20px) saturate(170%);
+  -webkit-backdrop-filter: blur(20px) saturate(170%);
+  border-top: 0.5px solid rgba(var(--c-white-rgb), 0.12);
+  border-right: 0.5px solid rgba(var(--c-white-rgb), 0.12);
+  border-bottom: 0.5px solid rgba(var(--c-white-rgb), 0.12);
+  border-radius: var(--mac-r-md) !important;
+  box-shadow:
+    inset 0 0.5px 0 rgba(var(--c-white-rgb), 0.10),
+    0 2px 10px rgba(0, 0, 0, 0.18);
+  transition:
+    background-color 240ms var(--mac-ease),
+    box-shadow 240ms var(--mac-ease);
+}
+
+/* 指数卡与资金卡的左边框是方向色条（红涨绿跌），
+   上面只覆盖其余三边，这里别动 border-left。 */
+
+.market-app .idx-card:hover,
+.market-app .fl-headline:hover {
+  background: rgba(var(--c-white-rgb), 0.085) !important;
+  box-shadow:
+    inset 0 0.5px 0 rgba(var(--c-white-rgb), 0.14),
+    0 6px 20px rgba(0, 0, 0, 0.26);
+}
+
+.market-app .mk-section {
+  animation: mac-panel-in 320ms var(--mac-ease) both;
+}
+
+.market-app .mk-refresh {
+  transition:
+    background-color 200ms var(--mac-ease),
+    transform 200ms var(--mac-ease);
+}
+
+.market-app .mk-refresh:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* ── 尊重系统「减少动态效果」设置。
+   动效是锦上添花，用户明确要求关掉时必须全部停掉（含极光漂移）。 */
+@media (prefers-reduced-motion: reduce) {
+  .settings::before,
+  .market-app::before,
+  .settings-body .tab-panel,
+  .settings-body .watch-row,
+  .settings-body .search-results,
+  .market-app .mk-section {
+    animation: none !important;
+  }
+}
+
+/* ── 提示音设置行（SoundRow）
+ *
+ * 结构：开关一行，音色下拉 + 三个按钮另起一行。
+ * 不挤在一行是因为下拉项文字较长（"清铃 — 两声清脆的铃音，最通用"），
+ * 与按钮同行会把下拉压得看不见内容。
+ */
+.snd-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+/* 相邻两组之间画分隔线，让"上涨"与"下跌"两组视觉上分开 */
+.snd-row + .snd-row {
+  border-top: 0.5px solid var(--mac-sep);
+}
+
+.snd-switch {
+  padding: 0;
+}
+
+.snd-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* 开关在上、控件缩进对齐到开关文字，形成从属关系 */
+  padding-left: 48px;
+}
+
+.snd-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  background: rgba(var(--c-white-rgb), 0.06);
+  border: 0.5px solid var(--mac-sep);
+  border-radius: var(--mac-r-sm);
+  color: var(--mac-label);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.snd-select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 下拉展开后的选项在 Windows 上由系统渲染，深色背景要显式给，
+   否则会是白底白字（WebView2 不继承父元素配色） */
+.snd-select option,
+.snd-select optgroup {
+  background: #26262a;
+  color: var(--mac-label);
+}
+
+.snd-btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 11px;
+  border-radius: var(--mac-r-sm) !important;
+  white-space: nowrap;
+}
+
+.snd-btn-danger {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.35);
+}
+
+.snd-btn-danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.16);
+}
+
+.snd-msg {
+  padding-left: 48px;
+  font-size: 10px;
+  color: var(--c-warn);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色主题下的毛玻璃修正
+ *
+ * token 覆盖（styles.css 的 `:root[data-theme="light"]`）能换掉颜色，
+ * 但**毛玻璃这层换不掉** —— 因为它依赖的不是某个色值，而是
+ * "采样源与卡片之间的明暗关系"。
+ *
+ * 深色下：深底 + 白灰光斑（亮） + 半透明白卡片 → 卡片"透出背后的光"
+ * 浅色下若照搬：白底 + 白灰光斑（看不见） + 半透明白卡片 → 虚化一块均匀白
+ *              = 毛玻璃退化成纯色板，用户会说"没有毛玻璃感"
+ *
+ * 所以浅色下把整套明暗关系反过来：**深色光斑 + 半透明白卡片**。
+ * 白底上叠深色光斑才有起伏可虚化，卡片浮在上面才有层次。
+ *
+ * alpha 取值同样不能照抄：黑色在白底上同 alpha 比白色在深底上**更抢眼**，
+ * 所以取 .05~.07（深色主题那边是 .16~.11），否则会显出脏灰斑。 */
+/* ⚠️ **浅色主题必须同时覆盖这一套 token。**
+ *
+ * 2026-08-30 的教训：第一版浅色主题只覆盖了 styles.css 的 40 个 `--c-*`，
+ * 结果用户报"只是把背景换成白色，字体还是白色完全看不到"。
+ * 根因就在这里 —— 设置窗的文字颜色由 `--mac-label`（#f5f5f7，近白）管，
+ * 它属于 macos.css 自己的一套 token，不在那 40 个里。
+ *
+ * 这套 token 在 macos.css 内有 36 处 var() 引用，覆盖了文字三级、背景两级、
+ * 分隔线、强调色。漏掉任何一个都会留下"浅色下看不见"的元素。
+ *
+ * 取值与 `--c-*` 浅色块保持同一套明度关系，避免两套 token 打架
+ * （例如 --mac-label 与 --c-text 都是正文色，深浅不一致会很刺眼）。 */
+:root[data-theme="light"] {
+  --mac-accent: #1668dc;
+  --mac-accent-hover: #0b57c4;
+  /* 底板比卡片深一档，让卡片浮起来 */
+  --mac-bg: #ececed;
+  --mac-bg-elev: #fdfdfd;
+  /* 分隔线由"白 11%"变"黑 11%"，否则白底上整条隐形 */
+  --mac-sep: rgba(0, 0, 0, 0.11);
+  /* 三级文字：与 --c-text / --c-text-2 / --c-text-3 对齐同一明度梯度。
+     正文不用纯黑 —— 白底上纯黑对比过强、久看疲劳 */
+  --mac-label: #1f2328;
+  --mac-label-2: rgba(31, 35, 40, 0.66);
+  --mac-label-3: rgba(31, 35, 40, 0.4);
+}
+
+/* market.css 的 --mk-* 同理（红绿在白底上要压深、分隔线要翻黑）。
+   这套只有 5 个 token，但大盘窗的涨跌数字全靠它们上色。 */
+:root[data-theme="light"] {
+  --mk-red: #d92b2e;
+  --mk-green: #0f8f56;
+  /* neutral/dim 反过来要变深：深色下它们是浅灰，白底上得用中灰才看得见 */
+  --mk-neutral: #4a5057;
+  --mk-dim: #6e757c;
+  --mk-sep: rgba(0, 0, 0, 0.09);
+}
+
+:root[data-theme="light"] .settings::before {
+  background:
+    radial-gradient(38% 42% at 18% 12%, rgba(0, 0, 0, 0.07), transparent 68%),
+    radial-gradient(42% 46% at 84% 26%, rgba(0, 0, 0, 0.06), transparent 70%),
+    radial-gradient(46% 40% at 50% 96%, rgba(0, 0, 0, 0.05), transparent 72%);
+}
+
+:root[data-theme="light"] .market-app::before {
+  background:
+    radial-gradient(40% 44% at 14% 10%, rgba(0, 0, 0, 0.06), transparent 68%),
+    radial-gradient(44% 46% at 88% 22%, rgba(0, 0, 0, 0.055), transparent 70%),
+    radial-gradient(46% 42% at 46% 98%, rgba(0, 0, 0, 0.045), transparent 72%);
+}
+
+/* 卡片本体：浅色下用半透明**白**（深色下是半透明白叠在深底，视觉是"提亮"；
+   浅色下同样是半透明白，但叠在深色光斑上，视觉变成"提亮 + 磨砂"）。
+   白黑 token 已互换，所以边框那句 rgba(var(--c-white-rgb), .12) 现在是黑色 12%，
+   在白底上正好是一条淡边 —— 这部分不用额外覆盖，互换已经处理了。 */
+:root[data-theme="light"] .settings-body .card,
+:root[data-theme="light"] .settings-body fieldset.card,
+:root[data-theme="light"] .settings-body .search-box,
+:root[data-theme="light"] .settings-body .direct-code-box,
+:root[data-theme="light"] .settings-body .watch-list {
+  background: rgba(255, 255, 255, 0.72) !important;
+}
+
+/* 设置窗底板：浅色下不能沿用 #171717。
+   比卡片深一档，让卡片浮起来 */
+:root[data-theme="light"] .settings-body {
+  background: #ececed !important;
+}
+
+/* 弹窗卡片：同理换成半透明白 */
+/* 弹窗卡片浅色底。alpha 与深色那边一致取 0.97 ——
+   弹窗没有 backdrop-filter（透明窗口用不了），太透会被桌面内容干扰读数。 */
+:root[data-theme="light"] .popup-card {
+  background: rgba(255, 255, 255, 0.97);
+}

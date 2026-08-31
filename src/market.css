@@ -1,0 +1,453 @@
+/* 大盘面板窗专属样式。加载顺序：styles.css → market.css → macos.css
+ *
+ * 配色取自 lib/colors.ts 的 TOKEN_HEX，**不要在这里另起一套色值** ——
+ * 悬浮窗的涨跌色由那个模块决定，两处色值分叉会让同一个"涨"在两个窗口里颜色不同。
+ *
+ * 本面板只做 A 股（用户 2026-08-27 决定），故直接用 A 股惯例：
+ * 红涨（--mk-red）绿跌（--mk-green）。若将来加美股，必须改走 colors.changeToken
+ * 按市场翻转，不能在 CSS 里硬编码。
+ */
+
+:root {
+  --mk-red: #f5484a;
+  --mk-green: #22b573;
+  --mk-neutral: #c9cdd4;
+  --mk-dim: #9aa0a6;
+  --mk-sep: rgba(255, 255, 255, 0.08);
+}
+
+/* styles.css 里 #root{width:max-content} 是给悬浮窗内容自适应用的，
+   会泄漏到本页面（多入口共用样式表）把内容压成半宽。
+   同 .chart-body #root / .settings-body #root 的办法，用更高特异性抵消。 */
+.market-body {
+  margin: 0;
+  background: #1f1f1f;
+  color: #e8eaed;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+.market-body #root {
+  width: 100%;
+  height: 100%;
+}
+
+.market-app {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 20px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+/* ---------- 头部 ---------- */
+
+.mk-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.mk-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.mk-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mk-time {
+  color: var(--mk-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.mk-refresh {
+  padding: 4px 12px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--mk-sep);
+  border-radius: 6px;
+  color: #e8eaed;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.mk-refresh:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.mk-refresh:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mk-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---------- 区块 ---------- */
+
+.mk-section {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.mk-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mk-dim);
+}
+
+.mk-section-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: #7b8085;
+}
+
+.mk-hint {
+  color: var(--mk-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 限流/失败提示用警告色，与"数据正常但都是 0"区分开 */
+.mk-warn {
+  color: #e6a23c;
+}
+
+/* ---------- 指数卡片 ---------- */
+
+.idx-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 9px;
+}
+
+.idx-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--mk-sep);
+  border-radius: 10px;
+}
+
+.idx-name {
+  font-size: 12px;
+  color: var(--mk-dim);
+}
+
+.idx-price {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.idx-change {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.idx-turnover {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #7b8085;
+}
+
+/* A 股惯例：红涨绿跌 */
+.idx-up .idx-price,
+.idx-up .idx-change {
+  color: var(--mk-red);
+}
+
+.idx-down .idx-price,
+.idx-down .idx-change {
+  color: var(--mk-green);
+}
+
+.idx-flat .idx-price,
+.idx-flat .idx-change {
+  color: var(--mk-neutral);
+}
+
+/* 左侧色条：不依赖颜色也能看出方向（色弱可辨） */
+.idx-up {
+  border-left: 3px solid var(--mk-red);
+}
+
+.idx-down {
+  border-left: 3px solid var(--mk-green);
+}
+
+.idx-flat {
+  border-left: 3px solid var(--mk-neutral);
+}
+
+/* ---------- 涨跌家数 ---------- */
+
+.bd-bar {
+  display: flex;
+  height: 14px;
+  overflow: hidden;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.bd-seg {
+  height: 100%;
+  /* 宽度变化做过渡，刷新时不会突兀跳变 */
+  transition: width 0.35s ease;
+}
+
+.bd-up {
+  background: var(--mk-red);
+}
+
+.bd-down {
+  background: var(--mk-green);
+}
+
+.bd-flat {
+  background: #5c6166;
+}
+
+.bd-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bd-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.bd-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.bd-t-up {
+  color: var(--mk-red);
+}
+
+.bd-t-down {
+  color: var(--mk-green);
+}
+
+.bd-t-flat {
+  color: var(--mk-neutral);
+}
+
+/* 逐市场明细 */
+.bd-markets,
+.fl-markets {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bd-mkt-row,
+.fl-mkt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.bd-mkt-row:nth-child(odd),
+.fl-mkt-row:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.bd-mkt-label,
+.fl-mkt-label {
+  color: var(--mk-dim);
+}
+
+.bd-mkt-nums {
+  display: inline-flex;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bd-sep {
+  color: #55595e;
+}
+
+.bd-mkt-err,
+.fl-mkt-err {
+  color: #e6a23c;
+  font-size: 10px;
+}
+
+/* ---------- 资金流向 ---------- */
+
+.fl-headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 11px 13px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--mk-sep);
+  border-radius: 10px;
+}
+
+.fl-headline-label {
+  font-size: 12px;
+  color: var(--mk-dim);
+}
+
+.fl-headline-value {
+  font-size: 19px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 净流入为正 = 资金进场，按 A 股惯例用红 */
+.fl-up .fl-headline-value {
+  color: var(--mk-red);
+}
+
+.fl-down .fl-headline-value {
+  color: var(--mk-green);
+}
+
+.fl-flat .fl-headline-value {
+  color: var(--mk-neutral);
+}
+
+.fl-up {
+  border-left: 3px solid var(--mk-red);
+}
+
+.fl-down {
+  border-left: 3px solid var(--mk-green);
+}
+
+.fl-flat {
+  border-left: 3px solid var(--mk-neutral);
+}
+
+.fl-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fl-tier {
+  display: grid;
+  /* 标签 / 双向条 / 数值三列，标签与数值定宽让条形对齐 */
+  grid-template-columns: 52px 1fr 96px;
+  align-items: center;
+  gap: 9px;
+  font-size: 11px;
+}
+
+.fl-tier-label {
+  color: var(--mk-dim);
+}
+
+.fl-track {
+  position: relative;
+  height: 11px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 5px;
+}
+
+/* 双向条：以中线为原点，流入向右、流出向左。
+   position:absolute + left/right:50% 由组件按正负设置。 */
+.fl-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.35s ease;
+}
+
+.fl-mid {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: 50%;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* 条形填充用**独立**的类名前缀（fl-bar-*），不复用 headline 的 fl-up/fl-down。
+   两者共用一个类名时，headline 的 border-left 会漏到条形上，
+   得靠 border-left:none 反复抵消 —— 那种写法下一个人加规则时必然再踩一次。 */
+.fl-bar-up {
+  background: var(--mk-red);
+}
+
+.fl-bar-down {
+  background: var(--mk-green);
+}
+
+.fl-bar-flat {
+  background: #5c6166;
+}
+
+.fl-tier-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.fl-t-up {
+  color: var(--mk-red);
+}
+
+.fl-t-down {
+  color: var(--mk-green);
+}
+
+.fl-t-flat {
+  color: var(--mk-neutral);
+}
+
+.fl-mkt-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 逐行数据时刻。轮转取数下各市场新鲜度不同，这个标注是必需的而非装饰 ——
+   但它是次要信息，用更小更暗的字，别抢走数字本身的注意力。 */
+.bd-mkt-time,
+.fl-mkt-time {
+  margin-left: 7px;
+  color: #7b8085;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fl-mkt-right {
+  display: inline-flex;
+  align-items: baseline;
+}

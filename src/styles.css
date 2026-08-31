@@ -1,0 +1,1084 @@
+/* ── 语义色 token
+ *
+ * 每色两种形态：
+ *   --c-x      实色，直接用：`color: var(--c-text)`
+ *   --c-x-rgb  三元组，供 alpha 变体用：`rgba(var(--c-text-rgb), 0.7)`
+ *
+ * 为什么要第二种：本项目有 64 处是「基色 + 不同 alpha」。若只 token 化实色，
+ * 浅色主题下 --c-text 翻成深色，而它的 70% 变体仍是硬编码的浅色，在白底上直接消失。
+ * 三元组让 alpha 变体跟着主题一起翻。
+ *
+ * 加浅色主题时只需在 `[data-theme="light"]` 里覆盖这些值，**不必改任何规则**。
+ *
+ * 放在 styles.css 顶部的理由：四个入口（main/settings/chart/market）都
+ * `import "./styles.css"` 且都排在各自专属样式之前，所以这里定义一次即全局可用。
+ *
+ * 本块由 scripts/tokenize-colors.mjs 生成，改色值请改那个脚本的 PALETTE 再重跑。 */
+:root {
+  /* 文字层级（由亮到暗） */
+  --c-text: #e8eaed;
+  --c-text-rgb: 232, 234, 237;
+  --c-text-strong: #f1f3f4;
+  --c-text-strong-rgb: 241, 243, 244;
+  --c-text-2: #c4c8cc;
+  --c-text-2-rgb: 196, 200, 204;
+  --c-text-3: #9aa0a6;
+  --c-text-3-rgb: 154, 160, 166;
+  --c-text-4: #6b7075;
+  --c-text-4-rgb: 107, 112, 117;
+
+  /* 背景层级（由深到浅）。全部中性灰 R=G=B —— 去蓝味的结果，别改回带蓝的深灰 */
+  --c-bg-sunken: #161616;
+  --c-bg-sunken-rgb: 22, 22, 22;
+  --c-bg: #1f1f1f;
+  --c-bg-rgb: 31, 31, 31;
+  --c-bg-elev: #262626;
+  --c-bg-elev-rgb: 38, 38, 38;
+  --c-bg-elev-2: #26262a;
+  --c-bg-elev-2-rgb: 38, 38, 42;
+  --c-bg-toast: #232323;
+  --c-bg-toast-rgb: 35, 35, 35;
+
+  /* 涨跌。注意：行价格的红涨绿跌**不走这里**，是 lib/colors.ts 的 TOKEN_HEX
+     用内联 style 打上去的（因为要按市场切换红绿语义）。这里只是徽章/错误文字用 */
+  --c-up: #f5484a;
+  --c-up-rgb: 245, 72, 74;
+  --c-up-soft: #e57373;
+  --c-up-soft-rgb: 229, 115, 115;
+
+  /* 强调色（按钮/焦点环/选中态/图表 MA 线） */
+  --c-accent: #4c9aff;
+  --c-accent-rgb: 76, 154, 255;
+  --c-accent-text: #cfe0ff;
+  --c-accent-text-rgb: 207, 224, 255;
+  --c-accent-chart: #5b9bd5;
+  --c-accent-chart-rgb: 91, 155, 213;
+
+  /* 警告/过期/均线 */
+  --c-warn: #e6a23c;
+  --c-warn-rgb: 230, 162, 60;
+  --c-warn-soft: #f0c078;
+  --c-warn-soft-rgb: 240, 192, 120;
+  --c-warn-2: #e8b64c;
+  --c-warn-2-rgb: 232, 182, 76;
+
+  /* 中性基色：overlay（白）与 shadow（黑）的 alpha 变体基底。
+     浅色主题下这两个要互换，否则"白色 8% 分隔线"在白底上看不见 */
+  --c-white: #ffffff;
+  --c-white-rgb: 255, 255, 255;
+  --c-black: #000000;
+  --c-black-rgb: 0, 0, 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 浅色（白天）主题
+ *
+ * **只覆盖 token 的值，不动任何一条规则** —— 这是先抽 token 换来的收益。
+ * 由 `useTheme` 把 `data-theme` 写到 <html> 上，40 条声明整体换血。
+ *
+ * 三个坑，都踩过或预判到：
+ *
+ * ① **白黑基底必须互换**（见文末 --c-white / --c-black）。
+ *    项目里有 64 处是 `rgba(var(--c-white-rgb), .08)` 这类"白色低透明度"，
+ *    用来画分隔线、内高光、hover 底。不换的话它们铺在白底上完全隐形，
+ *    表现是"浅色主题下所有分隔线和边框都消失了"。
+ *
+ * ② **行价格的红涨绿跌不在这里**。它在 lib/colors.ts 用内联 style 打，
+ *    CSS 覆盖不到 —— 那边有独立的浅色调色板（PALETTES）。
+ *
+ * ③ **毛玻璃的采样源要跟着翻**（在 macos.css 的 aurora 层）。
+ *    深色下是白灰光斑，浅色下必须换成深色光斑，否则 blur 虚化的是
+ *    一块均匀白 = 毛玻璃退化成纯色板。
+ *
+ * 配色取值原则：不是简单把深色值反过来，而是按**浅色界面的对比度需求**重取。
+ * 正文用近黑而非纯黑（纯黑在白底上刺眼）、背景用分层灰白而非纯白
+ * （纯白会让卡片和底板分不出层次）。 */
+:root[data-theme="light"] {
+  /* 文字层级（由深到浅）。最深的不用纯黑 #000 —— 白底上纯黑对比过强、久看疲劳 */
+  --c-text: #1f2328;
+  --c-text-rgb: 31, 35, 40;
+  --c-text-strong: #101418;
+  --c-text-strong-rgb: 16, 20, 24;
+  --c-text-2: #4a5057;
+  --c-text-2-rgb: 74, 80, 87;
+  --c-text-3: #6e757c;
+  --c-text-3-rgb: 110, 117, 124;
+  --c-text-4: #9aa0a6;
+  --c-text-4-rgb: 154, 160, 166;
+
+  /* 背景层级。深色下是"越 sunken 越深"，浅色下反过来"越 sunken 越灰"，
+     保持"层级差"这个语义不变 —— 规则里 var(--c-bg-sunken) 的用法不用改。
+     全部中性灰 R=G=B，与深色主题同一个去蓝原则 */
+  --c-bg-sunken: #ececed;
+  --c-bg-sunken-rgb: 236, 236, 237;
+  --c-bg: #f5f5f6;
+  --c-bg-rgb: 245, 245, 246;
+  --c-bg-elev: #fdfdfd;
+  --c-bg-elev-rgb: 253, 253, 253;
+  --c-bg-elev-2: #ffffff;
+  --c-bg-elev-2-rgb: 255, 255, 255;
+  --c-bg-toast: #ffffff;
+  --c-bg-toast-rgb: 255, 255, 255;
+
+  /* 涨跌徽章/错误文字。深色下的 #f5484a 在白底上偏亮、对比不足，压深一档 */
+  --c-up: #d92b2e;
+  --c-up-rgb: 217, 43, 46;
+  --c-up-soft: #c85a5a;
+  --c-up-soft-rgb: 200, 90, 90;
+
+  /* 强调色：同色相压深，保证白底上的按钮文字与焦点环足够清晰 */
+  --c-accent: #1668dc;
+  --c-accent-rgb: 22, 104, 220;
+  --c-accent-text: #0b4ba8;
+  --c-accent-text-rgb: 11, 75, 168;
+  --c-accent-chart: #2f6fae;
+  --c-accent-chart-rgb: 47, 111, 174;
+
+  /* 警告：橙黄在白底上尤其容易糊，比深色主题压得更深 */
+  --c-warn: #a86a12;
+  --c-warn-rgb: 168, 106, 18;
+  --c-warn-soft: #b8862f;
+  --c-warn-soft-rgb: 184, 134, 47;
+  --c-warn-2: #9c7415;
+  --c-warn-2-rgb: 156, 116, 21;
+
+  /* ⚠️ 坑 ①：白黑互换。
+     所有 rgba(var(--c-white-rgb), α) 的分隔线/高光/hover 底在这里变成"黑色低透明"，
+     rgba(var(--c-black-rgb), α) 的阴影变成"白色低透明"。
+     互换后那 64 处 alpha 变体自动适配浅色，一条规则都不用改。 */
+  --c-white: #000000;
+  --c-white-rgb: 0, 0, 0;
+  --c-black: #ffffff;
+  --c-black-rgb: 255, 255, 255;
+}
+
+/* Tauri 透明窗口的关键：任何祖先元素有不透明背景就会整块糊住，
+   所以 html / body / #root 必须全部显式透明。 */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* #root 同样按内容定宽（配合 .app 的 max-content）：
+   若这里仍是 width:100%，`.app` 的 max-content 内容会溢出 #root 并被
+   html/body 的 overflow:hidden 裁掉一帧 —— 测量值仍然正确、窗口下一轮就会长到位，
+   但首帧会闪一下裁切。放开它可避免这次闪烁。 */
+#root {
+  margin: 0;
+  padding: 0;
+  width: max-content;
+  height: 100%;
+  background: transparent;
+}
+
+* {
+  box-sizing: border-box;
+  /* 悬浮窗不应有文本选中高亮（拖拽时尤其明显） */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+body {
+  font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  font-size: 12px;
+  color: var(--c-text);
+  cursor: default;
+}
+
+/* 缩放与不透明度的默认值。实际值由 App.tsx 按配置注入同名 CSS 变量覆盖（D3）。
+   写在这里保证配置还没到达时（首帧）也有合理外观，不会闪一下超大或全透明。 */
+.app {
+  --scale: 1;
+  --font-size: 12px;
+  --font-size-sub: 10px;
+  --row-height: 44px;
+  --name-width: 66px;
+  --padding: 6px;
+  --row-gap: 2px;
+  --curve-width: 1;
+  --opacity-bg: 0.85;
+  --opacity-text: 1;
+  --opacity-curve: 1;
+
+  position: relative;
+  /* 内容尺寸自适应（D4）：窗口尺寸由前端测量内容后上报后端 set_size。
+     这里必须按内容定宽，**不能撑满窗口** —— 否则 ResizeObserver 量到的是
+     "被当前窗口约束后的宽度"而非"内容需要的宽度"，上报回去只会让窗口越缩越小
+     （G-1 实测塌缩到 60px，只剩股票名可见）。
+
+     用 max-content 而不是 fit-content：fit-content 等价于
+     min(max-content, max(min-content, available))，当 available 已经是 60px 时
+     仍会被夹回 60，解不开这个循环。max-content 忽略可用空间、按固有宽度定尺，
+     才能让测量结果反映"内容真正需要多宽"。
+
+     固有宽度是确定的：名称 66px（--name-width，flex 0 0）+ 曲线 104px×scale
+     （.row-chart 是 flex 0 0 auto，宽度来自 appearance.ts 的 BASE.chartWidth，
+     与窗口宽度无关）+ 数值区内容宽 + 左右 padding。 */
+  width: max-content;
+  height: 100%;
+}
+
+/*
+  D2：背景板是**独立兄弟层**，不是文字/曲线的祖先。
+  CSS opacity 会级联乘算 —— 若背景板是父元素，把它调到 0 会让文字与曲线一起消失，
+  而标准 11 明确要求"背景板调到 0，文字和曲线仍清晰可见"。
+*/
+.bg-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: var(--opacity-bg);
+  /* 中性灰（R=G=B），不带蓝味。原为 rgba(18,22,30) —— 悬浮窗是常驻可见的主表面，
+     这层是"黑底隐隐透蓝"最主要的来源。等感知亮度换算，层次不变。 */
+  background: rgba(var(--c-bg-sunken-rgb), 0.92);
+  border: 1px solid rgba(var(--c-white-rgb), 0.08);
+  border-radius: 8px;
+  backdrop-filter: blur(2px);
+  /* 背景板不参与命中测试：拖拽区挂在内容层上，
+     这样 opacity:0 时窗口依然可以拖动 */
+  pointer-events: none;
+}
+
+.content-layer {
+  position: relative;
+  z-index: 1;
+  padding: var(--padding);
+  /* 文字不透明度作用在内容层，与背景板互不影响 */
+  opacity: var(--opacity-text);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: calc(6px * var(--scale));
+  height: var(--row-height);
+  padding: 0 calc(4px * var(--scale));
+  border-radius: 4px;
+  transition: opacity 160ms ease;
+}
+
+.row-name {
+  width: var(--name-width);
+  flex: 0 0 var(--name-width);
+  display: flex;
+  flex-direction: column;
+  /* gap 在元素不存在时不会残留空隙，故关闭代码/市场显示后布局自然收紧（标准 13） */
+  gap: 1px;
+  overflow: hidden;
+}
+
+.name-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--font-size);
+  color: var(--c-text-strong);
+}
+
+.code-text,
+.market-text {
+  font-size: var(--font-size-sub);
+  color: var(--c-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  font-size: calc(9px * var(--scale));
+  line-height: calc(12px * var(--scale));
+  padding: 0 3px;
+  border-radius: 2px;
+  align-self: flex-start;
+  background: rgba(var(--c-warn-rgb), 0.22);
+  color: var(--c-warn);
+}
+
+.badge-err {
+  background: rgba(var(--c-up-rgb), 0.2);
+  color: var(--c-up);
+}
+
+.row-chart {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.row-value {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  min-width: 0;
+}
+
+.price {
+  font-size: var(--font-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.percent {
+  font-size: var(--font-size-sub);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.empty-hint {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: calc(12px * var(--scale));
+}
+
+.empty-title {
+  font-size: var(--font-size);
+  color: var(--c-text);
+}
+
+.empty-sub {
+  font-size: var(--font-size-sub);
+  color: var(--c-text-3);
+}
+
+.fatal {
+  padding: 8px;
+  font-size: 11px;
+  color: var(--c-up);
+}
+
+/* 配置损坏/迁移提示条（标准 19） */
+.notice-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(var(--c-warn-rgb), 0.18);
+  border: 1px solid rgba(var(--c-warn-rgb), 0.35);
+}
+
+.notice-text {
+  flex: 1 1 auto;
+  font-size: calc(10px * var(--scale));
+  line-height: 1.35;
+  color: var(--c-warn-soft);
+}
+
+.notice-close {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--c-warn-soft);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.notice-close:hover {
+  color: var(--c-white);
+}
+
+/* ==================== 设置窗 ====================
+   设置窗是**带边框的普通窗口**（不透明），与悬浮窗的透明规则无关，
+   故这里显式给不透明背景，不受上面 html/body 的 transparent 影响。
+   中性灰（R=G=B），不带蓝味。注意：macos.css 用 !important 覆盖成更深的
+   #171717，这里是它没加载时的兜底值。 */
+.settings-body {
+  background: var(--c-bg);
+}
+
+/* 撤掉上面 `#root { width: max-content }` 对设置窗的影响。
+ *
+ * 那条是**悬浮窗专用**的（D4：窗口尺寸由内容量出来上报后端），但设置窗与大图窗
+ * 同样 import 本文件，#root 会被夹到"内容宽度"而不是窗口宽度，
+ * 表现是面板只占窗口左侧一条、右边大片空白。
+ * 大图窗的同一处修复在 chart.css（`.chart-body #root`）。
+ *
+ * 悬浮窗的 <body> 没有 class，故它不受这两条影响，max-content 保持生效。
+ */
+.settings-body #root {
+  width: 100%;
+  height: 100%;
+}
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-size: 13px;
+}
+
+.tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid rgba(var(--c-white-rgb), 0.09);
+}
+
+.tab {
+  padding: 6px 14px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--c-text-3);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--c-text);
+}
+
+.tab-active {
+  color: var(--c-accent);
+  border-bottom-color: var(--c-accent);
+}
+
+/* 键盘可达性：Tab 键聚焦时必须有可见焦点环 */
+.tab:focus-visible,
+.text-input:focus-visible,
+.slider:focus-visible,
+.wr-remove:focus-visible,
+.search-item:focus-visible,
+.check input:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+
+.tab-panel {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.loading {
+  color: var(--c-text-3);
+  padding: 12px 0;
+}
+
+.field-label {
+  flex: 0 0 auto;
+  color: var(--c-text-2);
+  font-size: 12px;
+}
+
+.group-title {
+  margin-top: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(var(--c-white-rgb), 0.07);
+  color: var(--c-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hint-text {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.hint-strong {
+  color: var(--c-text-2);
+}
+
+.text-input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid rgba(var(--c-white-rgb), 0.14);
+  border-radius: 4px;
+  background: var(--c-bg-sunken);
+  color: var(--c-text);
+  font-size: 13px;
+  font-family: inherit;
+  /* 输入框内必须允许选中文本（全局 user-select:none 在这里要放开） */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.text-input:focus {
+  border-color: var(--c-accent);
+  outline: none;
+}
+
+/* ---------- 搜索 ---------- */
+
+.search-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.search-hint {
+  color: var(--c-text-3);
+  font-size: 11px;
+}
+
+/* 限流提示用警告色，与"无匹配结果"的中性灰明确区分 */
+.search-warn {
+  color: var(--c-warn);
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 210px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid rgba(var(--c-white-rgb), 0.09);
+  border-radius: 4px;
+}
+
+.search-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-item:hover:not(:disabled) {
+  background: rgba(var(--c-accent-rgb), 0.14);
+}
+
+.search-item:disabled {
+  color: var(--c-text-4);
+  cursor: not-allowed;
+}
+
+.si-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.si-code {
+  flex: 0 0 auto;
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.si-market {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(var(--c-white-rgb), 0.08);
+  color: var(--c-text-2);
+  font-size: 10px;
+}
+
+.si-added {
+  flex: 0 0 auto;
+  color: var(--c-warn);
+  font-size: 10px;
+}
+
+/* ---------- 直接输代码 ---------- */
+
+/* 结果列表复用 .search-results / .search-item，只需这两条自有样式 */
+.direct-code-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 10px;
+  padding-top: 10px;
+  /* 与搜索框之间画一条分隔线：两者是并列的两条添加通道，不是主从关系 */
+  border-top: 1px solid rgba(var(--c-white-rgb), 0.07);
+}
+
+.dc-row {
+  display: flex;
+  gap: 6px;
+}
+
+/* 输入框要吃掉剩余宽度，否则 flex 下会被按钮挤成一小格 */
+.dc-row .text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dc-submit {
+  flex: 0 0 auto;
+  padding: 0 12px;
+  background: rgba(var(--c-accent-rgb), 0.16);
+  border: 1px solid rgba(var(--c-accent-rgb), 0.34);
+  border-radius: 4px;
+  color: var(--c-accent-text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.dc-submit:hover:not(:disabled) {
+  background: rgba(var(--c-accent-rgb), 0.26);
+}
+
+.dc-submit:disabled {
+  background: rgba(var(--c-white-rgb), 0.05);
+  border-color: rgba(var(--c-white-rgb), 0.1);
+  color: var(--c-text-4);
+  cursor: not-allowed;
+}
+
+/* ---------- 自选股列表 ---------- */
+
+.list-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 4px;
+  color: var(--c-text-2);
+  font-size: 12px;
+}
+
+.watch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.watch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(var(--c-white-rgb), 0.08);
+  border-radius: 4px;
+  background: var(--c-bg-elev);
+  cursor: grab;
+  /* 拖动排序已改为 Pointer Events 实现（见 WatchlistPanel.tsx），
+     不再依赖 HTML5 拖放，所以这里不需要 -webkit-user-drag。
+     改动史：曾先后加过 dataTransfer.setData 与 -webkit-user-drag 试图
+     救活 HTML5 拖放，两次都仍然拖不动 —— 那条路在 WebView2 上前提太多。 */
+  touch-action: none;
+}
+
+/* 拖拽视觉反馈（标准 5）：拖起的行半透明，目标位置显示插入高亮 */
+.watch-row.dragging {
+  opacity: 0.45;
+}
+
+/* ── 换页滑入
+ *
+ * 方向跟手：往后翻从下方滑入（.from-below），往前翻从上方滑入（.from-above）。
+ * 固定单向会让往回翻感觉像倒放。
+ *
+ * 只动 transform 与 opacity —— 两者都是合成层属性，不触发重排。
+ * 这一点在悬浮窗尤其重要：窗口高度由 ResizeObserver 量内容后上报（D4），
+ * 若动画期间改变布局尺寸，窗口会跟着一帧一帧抽动。
+ *
+ * 位移取 14px 而非更大值：悬浮窗行高约 44px，位移过大会让人看到
+ * 上一页的残影从视野外掠过，反而显得杂乱。 */
+/* 直接用 --row-gap 而不是 gap:inherit：
+   .rows 的 gap 是 var(--row-gap)，inherit 继承的是"var(--row-gap)"这个
+   声明本身而非算出的长度，在这一层可能解析不到预期值。用同一个变量最稳。 */
+.page-slide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--row-gap);
+}
+
+.page-slide.from-below {
+  animation: page-slide-up 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.page-slide.from-above {
+  animation: page-slide-down 260ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes page-slide-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes page-slide-down {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* 尊重系统「减少动态效果」 */
+@media (prefers-reduced-motion: reduce) {
+  .page-slide.from-below,
+  .page-slide.from-above {
+    animation: none;
+  }
+}
+
+/* ── 悬浮窗分页指示点
+ *
+ * 超过 ROWS_PER_PAGE 只自选股时出现。滚轮换页是主要交互，
+ * 但只给滚轮用户不容易发现"还有下一页"，所以画出来并且可点。
+ *
+ * 尺寸刻意做小：它是状态指示不是主内容，占地方就抢了行情的视觉权重。 */
+.page-dots {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 0 1px;
+}
+
+.page-dot {
+  width: 5px;
+  height: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(var(--c-white-rgb), 0.28);
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    transform 160ms ease;
+}
+
+.page-dot:hover:not(.active) {
+  background: rgba(var(--c-white-rgb), 0.5);
+}
+
+.page-dot.active {
+  background: var(--c-text-2);
+  /* 当前页稍微放大，让"我在这一页"在余光里也能看出来 */
+  transform: scale(1.35);
+}
+
+.watch-row.drag-over {
+  border-color: var(--c-accent);
+  box-shadow: inset 0 2px 0 0 var(--c-accent);
+}
+
+.wr-handle {
+  flex: 0 0 auto;
+  color: var(--c-text-4);
+  letter-spacing: -2px;
+}
+
+.wr-index {
+  flex: 0 0 20px;
+  color: var(--c-text-4);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* 名称是主信息，占据剩余宽度。
+   长名称（如「沪深300ETF华泰柏瑞」）省略号截断而不是换行 ——
+   换行会把行高撑开，拖拽排序时行高不一致很难对准落点。 */
+.wr-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 代码降为辅助信息：不再抢主位，也不再吃掉剩余空间 */
+.wr-code {
+  flex: 0 0 auto;
+  color: var(--c-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wr-market {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(var(--c-white-rgb), 0.08);
+  color: var(--c-text-2);
+  font-size: 10px;
+}
+
+/* ---------- 隐藏状态 ---------- */
+
+/* 已隐藏的行整体压暗，但**保持可读** —— 用户要能看清是哪只、能操作它。
+   压得太暗会变成"看不见的行"，那和删除没区别了。 */
+.watch-row.wr-is-hidden {
+  opacity: 0.5;
+}
+
+.wr-hidden-tag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(var(--c-warn-rgb), 0.18);
+  color: var(--c-warn);
+  font-size: 10px;
+}
+
+/* ---------- 行右键菜单 ---------- */
+
+/* position:fixed + clientX/Y：不随列表滚动漂移。
+   z-index 要高于 toast（toast 是 100） */
+.wr-menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid rgba(var(--c-white-rgb), 0.14);
+  border-radius: 6px;
+  background: var(--c-bg-elev-2);
+  box-shadow: 0 6px 20px rgba(var(--c-black-rgb), 0.45);
+}
+
+.wr-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--c-text);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wr-menu-item:hover:not(:disabled) {
+  background: rgba(var(--c-accent-rgb), 0.22);
+}
+
+.wr-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.wr-menu-danger {
+  color: var(--c-up);
+}
+
+.wr-menu-danger:hover:not(:disabled) {
+  background: rgba(var(--c-up-rgb), 0.18);
+}
+
+.wr-menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: rgba(var(--c-white-rgb), 0.1);
+}
+
+/* 上移/下移按钮组 */
+.wr-order {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.wr-move {
+  width: 22px;
+  padding: 2px 0;
+  border: 1px solid rgba(var(--c-white-rgb), 0.14);
+  border-radius: 3px;
+  background: rgba(var(--c-white-rgb), 0.06);
+  color: var(--c-text-2);
+  font-size: 12px;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.wr-move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.wr-remove {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid rgba(var(--c-up-rgb), 0.4);
+  border-radius: 3px;
+  background: none;
+  color: var(--c-up);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.wr-remove:hover:not(:disabled) {
+  background: rgba(var(--c-up-rgb), 0.16);
+}
+
+.wr-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.empty-list {
+  padding: 16px 0;
+  color: var(--c-text-3);
+  font-size: 12px;
+  text-align: center;
+}
+
+.warn-bar {
+  padding: 5px 8px;
+  border: 1px solid rgba(var(--c-warn-rgb), 0.35);
+  border-radius: 4px;
+  background: rgba(var(--c-warn-rgb), 0.14);
+  color: var(--c-warn);
+  font-size: 11px;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 4px;
+  background: rgba(var(--c-bg-toast-rgb), 0.96);
+  border: 1px solid rgba(var(--c-white-rgb), 0.14);
+  color: var(--c-text);
+  font-size: 12px;
+  box-shadow: 0 4px 14px rgba(var(--c-black-rgb), 0.4);
+}
+
+/* ---------- 外观滑块 ---------- */
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.slider-row .field-label {
+  flex: 0 0 72px;
+}
+
+.slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--c-accent);
+  cursor: pointer;
+}
+
+.slider-value {
+  flex: 0 0 52px;
+  color: var(--c-text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 共用 Slider 组件统一用 span（标签）+ em（数值）两个裸标签，
+   这里给外观页补上与 .field-label / .slider-value 等价的样式。
+   两页历史结构不同（外观页原来是 .field-label + .slider-value，
+   提醒页是 span + em），组件收敛成一种结构后靠这段对齐外观，
+   而不是给组件加一堆 class 参数 —— 参数化会把差异永久固化下来。 */
+.slider-row > span {
+  flex: 0 0 72px;
+  color: var(--c-text-2);
+  font-size: 12px;
+}
+
+.slider-row > em {
+  flex: 0 0 52px;
+  font-style: normal;
+  color: var(--c-text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--c-text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--c-accent);
+  cursor: pointer;
+}
+
+.about-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* ---------- 滚动条（不悬停时半透明，标准 7） ---------- */
+
+.tab-panel::-webkit-scrollbar,
+.search-results::-webkit-scrollbar {
+  width: 8px;
+}
+
+.tab-panel::-webkit-scrollbar-thumb,
+.search-results::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(var(--c-white-rgb), 0.14);
+}
+
+.tab-panel:hover::-webkit-scrollbar-thumb,
+.search-results:hover::-webkit-scrollbar-thumb {
+  background: rgba(var(--c-white-rgb), 0.3);
+}
+
+.tab-panel::-webkit-scrollbar-track,
+.search-results::-webkit-scrollbar-track {
+  background: transparent;
+}

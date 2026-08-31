@@ -1,0 +1,36 @@
+node_modules/
+dist/
+dist-ssr/
+
+# 开发过程文档与探针脚本（验收契约、踩坑记录、安全审计、GUI 截图、
+# Python/PowerShell 探针）。它们是 harness 驱动开发的产物，
+# 对使用者和贡献者都不是必要信息，故不进仓库。
+harness/
+# 免安装包的暂存目录（打 zip 用），产物不进仓库
+dist-pkg/
+src-tauri/target/
+
+# tauri_build::build() 在每次编译时自动生成（约 250 KB 的 JSON schema）。
+# Tauri 官方模板默认忽略它 —— 提交进去只会让每次构建都产生无意义的 diff。
+src-tauri/gen/schemas/
+
+# 本机构建产物目录重定向（本机 F: 盘空间不足，target 指到 D:）。
+# **这是本机特有配置，不进仓库** —— 别人克隆后没有 D: 盘会直接编译失败。
+# 缺这个文件时 cargo 用默认的 src-tauri/target/，对新环境正是想要的行为。
+src-tauri/.cargo/config.toml
+
+# 敏感文件（本项目不使用密钥，规则仍需就位防未来误提交）
+.env
+.env.*
+*.key
+*.pem
+*.pfx
+*.p12
+credentials.json
+
+*.local
+.DS_Store
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea/

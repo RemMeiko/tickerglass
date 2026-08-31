@@ -1,0 +1,32 @@
+[package]
+name = "tickerglass"
+version = "0.1.0"
+description = "TickerGlass 桌面行情悬浮窗"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "tickerglass_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# 锁到 minor：开区间 "2" 会漂到 2.12+，而 tauri CLI 强制要求
+# Rust crate 与 @tauri-apps/api 的 major/minor 对齐，漂移会直接让 `tauri build` 失败
+tauri = { version = "2.11", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time", "rt-multi-thread", "macros"] }
+# 只用 bytes() 不用 json()：GBK 报文必须按字节读，text()/json() 会按 UTF-8 猜解码导致中文乱码
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+encoding_rs = "0.8"
+chrono = { version = "0.4", features = ["clock"] }
+# 仅用于 parse/em_trends.rs 的北京→美东刻度换算（EDT/EST 由时区数据库决定，禁止硬编码时差）
+chrono-tz = "0.10"
+log = "0.4"
+env_logger = "0.11"
+# 仅用于定位 %APPDATA%（纯路径查询，无网络、无 I/O 副作用）
+dirs = "6.0"

@@ -1,0 +1,298 @@
+/* 大图窗（方案 A）。独立文件，避免把 800 行主样式再撑大。 */
+
+.chart-body {
+  background: var(--c-bg);
+}
+
+/* 撤掉 styles.css 里 `#root { width: max-content }` 对本窗口的影响。
+ *
+ * 那条是**悬浮窗专用**的（D4 内容自适应：窗口尺寸由内容量出来上报后端）。
+ * 但大图窗也 import 了 styles.css，于是 #root 被夹到"内容宽度"而不是窗口宽度 ——
+ * 实测 880 宽的窗口里 .chart-body-row 只有 500px，减去 132px 侧栏后
+ * 绘图区仅 368px，表现就是**图只画了左边一半、右边空着**（2026-08-27 用户报）。
+ *
+ * 这里用 `.chart-body #root` 提高特异性覆盖它；不去改 styles.css 那条，
+ * 因为悬浮窗确实需要 max-content。
+ */
+.chart-body #root {
+  width: 100%;
+  height: 100%;
+}
+
+.chart-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--c-bg);
+  color: var(--c-text);
+  /* 大图窗是普通窗口，允许选中文本读数值 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ── 顶栏：标的名 + 周期 Tab + 刷新 */
+.chart-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(var(--c-white-rgb), 0.08);
+  flex: 0 0 auto;
+}
+
+.chart-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ct-name {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ct-code {
+  font-size: 12px;
+  color: rgba(var(--c-text-rgb), 0.55);
+}
+
+.chart-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.chart-tabs .tab {
+  padding: 4px 14px;
+  font-size: 12px;
+  color: rgba(var(--c-text-rgb), 0.7);
+  background: rgba(var(--c-white-rgb), 0.05);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chart-tabs .tab:hover {
+  background: rgba(var(--c-white-rgb), 0.1);
+}
+
+.chart-tabs .tab.active {
+  color: var(--c-text);
+  background: rgba(var(--c-accent-chart-rgb), 0.22);
+  border-color: rgba(var(--c-accent-chart-rgb), 0.5);
+}
+
+.chart-refresh {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: rgba(var(--c-text-rgb), 0.7);
+  background: rgba(var(--c-white-rgb), 0.05);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chart-refresh:hover {
+  background: rgba(var(--c-white-rgb), 0.1);
+}
+
+/* ── 主体：左侧自选股 + 右侧图 */
+.chart-body-row {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.chart-side {
+  flex: 0 0 132px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px;
+  overflow-y: auto;
+  border-right: 1px solid rgba(var(--c-white-rgb), 0.08);
+}
+
+.side-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 5px 8px;
+  text-align: left;
+  color: rgba(var(--c-text-rgb), 0.8);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.side-item:hover {
+  background: rgba(var(--c-white-rgb), 0.06);
+}
+
+.side-item.active {
+  background: rgba(var(--c-accent-chart-rgb), 0.18);
+  border-color: rgba(var(--c-accent-chart-rgb), 0.45);
+  color: var(--c-text);
+}
+
+.si-name {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 112px;
+}
+
+.si-code {
+  font-size: 10px;
+  color: rgba(var(--c-text-rgb), 0.45);
+}
+
+.side-empty {
+  padding: 8px;
+  font-size: 11px;
+  color: rgba(var(--c-text-rgb), 0.4);
+}
+
+/* 图区：ResizeObserver 量它的尺寸，故必须能收缩（min-* : 0） */
+.chart-plot {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.candle-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 读数条浮在图上方，不占布局高度（否则会与 ResizeObserver 互相挤） */
+.candle-readout {
+  position: absolute;
+  top: 4px;
+  left: 58px;
+  right: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: rgba(var(--c-text-rgb), 0.85);
+  pointer-events: none;
+}
+
+/* 缩放倍数徽标。放右下角：左上是读数条、左侧是价格刻度，
+   右下是唯一不与数据重叠的位置。
+   pointer-events 保持可用 —— 它自己要接双击复位。 */
+.zoom-badge {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(var(--c-black-rgb), 0.42);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(var(--c-text-rgb), 0.72);
+  cursor: pointer;
+  user-select: none;
+}
+
+.ro-date {
+  color: rgba(var(--c-text-rgb), 0.6);
+}
+
+.ro-hint {
+  color: rgba(var(--c-text-rgb), 0.35);
+}
+
+.ro-ma5 {
+  color: var(--c-warn-2);
+}
+
+.ro-ma20 {
+  color: var(--c-accent-chart);
+}
+
+.chart-msg {
+  margin: auto;
+  font-size: 13px;
+  color: rgba(var(--c-text-rgb), 0.6);
+  text-align: center;
+}
+
+.chart-err {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  max-width: 70%;
+  color: var(--c-up-soft);
+}
+
+.chart-err button {
+  padding: 4px 14px;
+  font-size: 12px;
+  color: var(--c-text);
+  background: rgba(var(--c-white-rgb), 0.08);
+  border: 1px solid rgba(var(--c-white-rgb), 0.16);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* ── 底栏：图例 + 免责 */
+.chart-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 5px 12px;
+  font-size: 11px;
+  border-top: 1px solid rgba(var(--c-white-rgb), 0.08);
+  flex: 0 0 auto;
+}
+
+.legend::before {
+  content: "—— ";
+  font-weight: 700;
+}
+
+.legend.ma5 {
+  color: var(--c-warn-2);
+}
+
+.legend.ma20 {
+  color: var(--c-accent-chart);
+}
+
+.legend.avg {
+  color: rgba(var(--c-warn-2-rgb), 0.85);
+}
+
+.foot-note {
+  margin-left: auto;
+  color: rgba(var(--c-text-rgb), 0.4);
+}
+
+.chart-side::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chart-side::-webkit-scrollbar-thumb {
+  background: rgba(var(--c-white-rgb), 0.12);
+  border-radius: 4px;
+}
+
+.chart-side::-webkit-scrollbar-track {
+  background: transparent;
+}
