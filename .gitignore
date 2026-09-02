@@ -6,7 +6,9 @@ dist-ssr/
 # Python/PowerShell 探针）。它们是 harness 驱动开发的产物，
 # 对使用者和贡献者都不是必要信息，故不进仓库。
 harness/
-# 免安装包的暂存目录（打 zip 用），产物不进仓库
+# 免安装包的暂存目录（打 zip 用），产物不进仓库。
+# 注意 packaging/ 不在此列 —— 那里放随包发布的「使用说明.txt」源文件，必须进仓库，
+# 由 scripts/pack-release.mjs 拷进成品目录。
 dist-pkg/
 src-tauri/target/
 

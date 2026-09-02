@@ -1,0 +1,84 @@
+# 推 tag 即自动构建并发布 Release。
+#
+# 用法：
+#   git tag v0.2.0 && git push origin v0.2.0
+# 之后什么都不用做 —— CI 自己编译、自己建 Release、自己传安装包。
+#
+# 为什么用 Actions 而不是本地 `gh release create`：
+# 后者只自动化"上传"，构建仍在本机（实测 release 编译约 3 分钟），
+# 且要先 `winget install GitHub.cli` 并登录。Actions 把构建也搬到云端，
+# 本地零依赖。代价是 CI 冷启动编译更慢（Rust 依赖全新编译，约 10~15 分钟），
+# 但有 cargo 缓存后续会快。
+#
+# 只构建 Windows：本项目是 Windows 桌面悬浮窗，bundle.targets 是 ["nsis"]，
+# 没有 macOS/Linux 产物需求。要加平台就往 matrix 里加 runner。
+
+name: Release
+
+on:
+  push:
+    tags:
+      # 只匹配 v 开头的语义化版本 tag，避免其它 tag 误触发一次 15 分钟的构建
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # 允许手动触发，方便调试 workflow 本身而不必反复打 tag
+  workflow_dispatch:
+
+# 必须显式给写权限：tauri-action 要创建 Release 并上传附件。
+# 默认的 GITHUB_TOKEN 只有读权限，不给就是 403。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          # 走 package-lock.json 的缓存（本项目用 npm，非 pnpm/yarn）
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Rust 依赖缓存。首次跑没有缓存，之后能把 10~15 分钟压到几分钟。
+      # 放在 install 之前：它只依赖 Cargo.lock，与前端无关。
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # 类型检查与单测在构建前跑 —— tag 已经推出去了，
+      # 但产物不该在测试红着的情况下发布。
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npx vitest run
+
+      - name: Build and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # tagName 用推上来的那个 tag；releaseName 去掉 v 前缀更好看
+          tagName: ${{ github.ref_name }}
+          releaseName: TickerGlass ${{ github.ref_name }}
+          releaseBody: |
+            ## 安装
+
+            下载下方 `TickerGlass_x.x.x_x64-setup.exe` 运行即可。
+
+            ---
+            由 GitHub Actions 自动构建发布。
+          # draft: true —— 先发草稿，你在 GitHub 上看一眼产物没问题再点 Publish。
+          # 想完全免手动就改成 false，那样推 tag 后直接公开发布。
+          releaseDraft: true
+          prerelease: false
