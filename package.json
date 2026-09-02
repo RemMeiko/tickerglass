@@ -1,7 +1,7 @@
 {
   "name": "tickerglass",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
     "app:exe": "tauri build --debug --no-bundle",
     "app:exe:release": "tauri build --no-bundle",
     "app:run": "node scripts/run-exe.mjs",
+    "pack": "node scripts/pack-release.mjs",
     "app:setup": "tauri build"
   },
   "dependencies": {
