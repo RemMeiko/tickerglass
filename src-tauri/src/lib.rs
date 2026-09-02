@@ -55,6 +55,7 @@ pub fn run() {
             ipc::open_settings_window,
             ipc::set_always_on_top,
             ipc::set_locked,
+            ipc::set_collapsed,
             ipc::resize_main_window,
             ipc::fetch_chart,
             ipc::open_chart_window,
@@ -155,6 +156,14 @@ fn register_context_menu_handler(app: &tauri::AppHandle) {
                 // 落盘与事件广播。这里另写一份必然与它分叉。
                 if let Err(e) = ipc::apply_locked(app, &state, next) {
                     log::error!("[右键菜单] 锁定设置失败: {e}");
+                }
+            }
+            window::CTX_ID_FORM => {
+                // 取反当前形态。用 is_collapsed() 而不是直接读 collapsed ——
+                // 老配置里那个字段是 None，直读取反会得到错误的目标态。
+                let next = !state.config().window.is_collapsed();
+                if let Err(e) = ipc::apply_collapsed(app, &state, next) {
+                    log::error!("[右键菜单] 形态切换失败: {e}");
                 }
             }
             window::CTX_ID_QUIT => {

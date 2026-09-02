@@ -450,6 +450,12 @@ pub const CTX_ID_MARKET: &str = "ctx-market";
 pub const CTX_ID_TOP: &str = "ctx-top";
 pub const CTX_ID_LOCK: &str = "ctx-lock";
 pub const CTX_ID_QUIT: &str = "ctx-quit";
+/// 球态 ↔ 展开列表。
+///
+/// 为什么右键菜单里也要有：球态下单击是"展开"，展开态下单击**不能**是"收起" ——
+/// 展开后整个窗口是股票列表，单击某一行有自己的语义（双击开大图）。
+/// 所以收起只能走菜单，这一项是展开态回到球态的唯一入口。
+pub const CTX_ID_FORM: &str = "ctx-form";
 
 /// 逐行「隐藏这只」的菜单项 id 前缀，后面直接拼 `tencent_code`
 /// （如 `ctx-hide:sh600519`）。
@@ -512,6 +518,20 @@ pub fn popup_context_menu(
         .map_err(|e| e.to_string())?;
     let market = MenuItem::with_id(app, CTX_ID_MARKET, "大盘…", true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    // 形态切换。文字写"要变成什么"而不是当前状态 —— 菜单项是动作，
+    // 写成"当前：球态"用户还得自己推断点下去会发生什么。
+    let form = MenuItem::with_id(
+        app,
+        CTX_ID_FORM,
+        if cfg.window.is_collapsed() {
+            "展开为列表"
+        } else {
+            "收起为球"
+        },
+        true,
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     let top = CheckMenuItem::with_id(
         app,
         CTX_ID_TOP,
@@ -553,14 +573,18 @@ pub fn popup_context_menu(
         None => None,
     };
 
+    // 形态项放「设置…」之前：它是改变悬浮窗外观的高频操作，
+    // 比设置窗更靠近"我现在就想换个样子"的意图。
     let menu = match &hide_item {
         Some(hide) => Menu::with_items(
             app,
-            &[hide, &sep, &settings, &market, &sep, &top, &lock, &sep, &quit],
+            &[
+                hide, &sep, &form, &settings, &market, &sep, &top, &lock, &sep, &quit,
+            ],
         ),
         None => Menu::with_items(
             app,
-            &[&settings, &market, &sep, &top, &lock, &sep, &quit],
+            &[&form, &settings, &market, &sep, &top, &lock, &sep, &quit],
         ),
     }
     .map_err(|e| e.to_string())?;

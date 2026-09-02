@@ -137,6 +137,14 @@ export interface WindowConfig {
   always_on_top: boolean;
   /** 锁定 = 不可拖动 + 点击穿透。解锁的唯一通道是托盘菜单 */
   locked: boolean;
+  /**
+   * 悬浮窗形态：`true` = 收起为球（单只轮播），`false` = 展开列表。
+   *
+   * `null`（旧配置未写过这个字段）**等同 true**，即球态 —— 球是主形态。
+   * 读取一律用 `isCollapsed()`（lib/ballRotate 之外的地方直接写
+   * `?? true` 也可以），**不要写 `?? false`**，那会让老用户升级后直接展开。
+   */
+  collapsed: boolean | null;
 }
 
 export interface AppConfig {

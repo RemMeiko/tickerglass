@@ -528,6 +528,39 @@ pub fn apply_locked(
     Ok(next)
 }
 
+/// 悬浮窗形态切换：球态（单只轮播）↔ 展开列表。
+///
+/// 这里**不动窗口尺寸** —— 尺寸仍由前端 `ResizeObserver` 测内容后走
+/// `resize_main_window` 上报（D4 的单一真源）。后端若也改一次 set_size，
+/// 会和前端的上报打架，出现"先跳到球大小、又被列表尺寸顶回去"的抽动。
+#[tauri::command]
+pub fn set_collapsed(
+    collapsed: bool,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<AppConfig, String> {
+    let state = state.inner().clone();
+    apply_collapsed(&app, &state, collapsed)
+}
+
+/// 供 ipc 与右键菜单共用的落地逻辑。
+pub fn apply_collapsed(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    collapsed: bool,
+) -> Result<AppConfig, String> {
+    let next = state.update_config(|cfg| {
+        cfg.window.collapsed = Some(collapsed);
+        cfg.clone()
+    });
+    commit(app, state, next.clone(), false);
+    log::info!(
+        "[窗口] 形态 → {}",
+        if collapsed { "球态" } else { "展开列表" }
+    );
+    Ok(next)
+}
+
 /// 前端测得内容尺寸后上报（D4）。前端已做 ≥100ms 防抖，这里不再节流。
 #[tauri::command]
 pub fn resize_main_window(width: f64, height: f64, app: AppHandle) -> Result<(), String> {

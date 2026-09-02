@@ -317,6 +317,27 @@ pub struct WindowConfig {
     pub always_on_top: bool,
     /// 锁定 = 不可拖动 + 点击穿透。**解锁的唯一通道是托盘菜单**（标准 16）
     pub locked: bool,
+    /// 悬浮窗形态：`true` = 收起为球（单只轮播），`false` = 展开列表。
+    ///
+    /// **不需要 schema 迁移**：`Option<bool>` + 结构体上的 `#[serde(default)]`，
+    /// 旧配置缺这个字段时补 `None`。取值一律走 [`WindowConfig::is_collapsed`]，
+    /// 不要直接读这个字段 —— `None` 的语义是"球态"而不是"展开"，
+    /// 直接 `unwrap_or_default()` 会得到 `false`（展开），正好反了。
+    ///
+    /// 为什么 `None` 映射成球态：球是 2026-09-01 起的主形态，
+    /// 老用户升级后也该看到球（用户要的是"默认球、点击才展开"）。
+    pub collapsed: Option<bool>,
+}
+
+impl WindowConfig {
+    /// 悬浮窗是否处于球态。`None`（旧配置/未设置）视为 `true`。
+    ///
+    /// 存在的理由：`collapsed` 是 `Option<bool>`，而 `None` 的业务语义是"球态"，
+    /// 与 `bool::default()`（false）相反。所有读取点都必须经过这里，
+    /// 否则会出现"旧配置升级后直接展开成列表"的回归。
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed.unwrap_or(true)
+    }
 }
 
 impl Default for WindowConfig {
@@ -326,6 +347,9 @@ impl Default for WindowConfig {
             y: None,
             always_on_top: true,
             locked: false,
+            // None 而不是 Some(true)：让"未写过这个字段"和"显式设为球态"在
+            // 配置文件里可区分。读取一律走 is_collapsed()，两者行为相同。
+            collapsed: None,
         }
     }
 }

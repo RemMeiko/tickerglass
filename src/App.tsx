@@ -10,17 +10,19 @@ import type { AppConfig, Snapshot } from "./types";
 import {
   dismissConfigNotice,
   fetchConfigNotice,
-  fetchSnapshot,
   openChartWindow,
   openSettingsWindow,
   resizeMainWindow,
+  setCollapsed,
   showContextMenu,
-  subscribeSnapshot,
 } from "./lib/ipc";
 import { useConfig } from "./hooks/useConfig";
+import { useSnapshot } from "./hooks/useSnapshot";
 import { chartSize, cssVars, windowSizeFor } from "./lib/appearance";
+import { clampScale } from "./lib/appearance";
 import QuoteRow from "./components/QuoteRow";
 import EmptyHint from "./components/EmptyHint";
+import StockBall from "./components/StockBall";
 
 /** 兜底，保证任何渲染异常都不会让悬浮窗变成空白 */
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -55,17 +57,19 @@ const RESIZE_DEBOUNCE_MS = 100;
 const ROWS_PER_PAGE = 8;
 
 function Rows({
+  snapshot,
   config,
   locked,
   onOpenChart,
   onRowContextMenu,
 }: {
+  /** 由 App 层的 `useSnapshot` 提供 —— 球态与列表态共用同一份订阅 */
+  snapshot: Snapshot | null;
   config: AppConfig | null;
   locked: boolean;
   onOpenChart: (code: string, name: string | null) => void;
   onRowContextMenu: (code: string) => void;
 }) {
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   /**
    * 当前页（0 起）。超过 ROWS_PER_PAGE 只的自选股分页显示，滚轮换页。
    *
@@ -82,31 +86,8 @@ function Rows({
    */
   const [pageDir, setPageDir] = useState<1 | -1>(1);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-
-    // 事件订阅 + 首屏 invoke 双通道，避免错过启动瞬间的首个事件
-    subscribeSnapshot((snap) => {
-      if (!cancelled) setSnapshot(snap);
-    })
-      .then((fn) => {
-        unlisten = fn;
-      })
-      .catch((e) => console.error("订阅快照失败:", e));
-
-    fetchSnapshot()
-      .then((snap) => {
-        // 已有事件推送过来时不要用首屏结果回退覆盖
-        if (!cancelled) setSnapshot((prev) => prev ?? snap);
-      })
-      .catch((e) => console.error("获取首屏快照失败:", e));
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []);
+  // 快照订阅已提到 App 层的 useSnapshot —— 球态也要这份数据，
+  // 两处各订阅一次会让切换形态后新挂载的那侧空白等下一轮推送。
 
   // 首屏骨架由后端的 Pending 行提供；rows 为空才是"无自选股"
   if (snapshot && snapshot.rows.length === 0) {
@@ -305,6 +286,31 @@ export default function App() {
     ? (cssVars(config.appearance) as React.CSSProperties)
     : undefined;
 
+  // 快照提到这一层：球态与列表态共用同一份订阅（见 useSnapshot 的注释）
+  const snapshot = useSnapshot();
+
+  /**
+   * 悬浮窗形态。**必须写 `?? true`** ——
+   * `collapsed` 为 `null` 表示"旧配置没写过这个字段"，语义是球态。
+   * 写成 `?? false` 会让所有老用户升级后直接看到展开的列表。
+   *
+   * `config` 尚未到达（首帧）时也按球态渲染：球是固定尺寸，
+   * 首帧就能量出正确窗口大小；若首帧渲成列表再切球，
+   * ResizeObserver 会上报两次尺寸，窗口可见地抽一下。
+   */
+  const isBall = config?.window.collapsed ?? true;
+
+  // 球态下的可见行。列表态的过滤在 Rows 内部做（那边还要区分
+  // "无自选股"与"全部隐藏"两种提示），这里只需要能显示的那些。
+  const visibleRows = (snapshot?.rows ?? []).filter((r) => !r.hidden);
+
+  const handleExpand = () => {
+    if (locked) return;
+    void setCollapsed(false).catch((e) =>
+      console.error("展开为列表失败:", e)
+    );
+  };
+
   // 原先这里有一份「代码 → 名称/市场」映射 + 一条快照订阅，专供已删除的
   // 提醒卡片使用。卡片移到中心弹窗后一并删除 —— PopupApp 自己取快照，
   // 留在这里就是每轮白订阅一次。
@@ -329,7 +335,7 @@ export default function App() {
 
   return (
     <div
-      className="app"
+      className={`app ${isBall ? "is-ball" : ""}`}
       style={style}
       // 右键菜单挂在**最外层**，这样窗口上任何位置都能唤出 —— 包括股票行上。
       //
@@ -365,24 +371,50 @@ export default function App() {
         */}
         <div
           className="content-layer"
-          {...(locked ? {} : { "data-tauri-drag-region": true })}
+          // ⚠️ 球态**绝不能**挂 data-tauri-drag-region。
+          // 挂上之后 mousedown 被系统直接接管去拖窗口，click 与 contextmenu
+          // 都不会到达 React —— 表现就是"点球没反应、右键也没反应"。
+          // 球态的拖窗由 StockBall 内部用 pointer 位移阈值自己分派
+          // （小于阈值 = 点击展开，超过 = 调 startDragging）。
+          {...(locked || isBall ? {} : { "data-tauri-drag-region": true })}
           onDoubleClick={() => {
             // 锁定态下不响应双击（此时鼠标事件本已被系统穿透，这里是双重保险）
             if (locked) return;
+            // 球态下双击不开设置：球上单击是"展开"，双击会先触发一次单击、
+            // 紧接着又开设置窗，用户看到的是"点一下弹出两个东西"。
+            // 球态要开设置走右键菜单。
+            if (isBall) return;
             void openSettingsWindow().catch((e) =>
               console.error("打开设置窗失败:", e)
             );
           }}
-          title={locked ? "" : "右键打开菜单（也可双击此处开设置）"}
+          title={
+            locked
+              ? ""
+              : isBall
+                ? ""
+                : "右键打开菜单（也可双击此处开设置）"
+          }
         >
           <ConfigNotice />
           <ErrorBoundary>
-            <Rows
-              config={config}
-              locked={locked}
-              onOpenChart={handleOpenChart}
-              onRowContextMenu={handleRowContextMenu}
-            />
+            {isBall ? (
+              <StockBall
+                rows={visibleRows}
+                locked={locked}
+                scale={clampScale(config?.appearance.scale ?? 1)}
+                theme={config?.appearance.theme ?? "dark"}
+                onExpand={handleExpand}
+              />
+            ) : (
+              <Rows
+                snapshot={snapshot}
+                config={config}
+                locked={locked}
+                onOpenChart={handleOpenChart}
+                onRowContextMenu={handleRowContextMenu}
+              />
+            )}
           </ErrorBoundary>
         </div>
 

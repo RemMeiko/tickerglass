@@ -68,6 +68,25 @@
   --c-white-rgb: 255, 255, 255;
   --c-black: #000000;
   --c-black-rgb: 0, 0, 0;
+
+  /* ── 球态星空配色（D6）
+     为什么不复用 --c-bg-* ：那套是界面底板色，深色下是 22~38 的中性灰，
+     铺在球上就是用户说的"漆黑"。星空需要**带色偏的深色**（蓝紫向），
+     纯黑会让星点像撒在纸上的盐，没有"深邃"。
+
+     四个 token 的分工：
+       deep   = 球缘最暗处（夜空最深的地方）
+       mid    = 球心附近的稍亮底（有它才有纵深，单色球是个平面圆盘）
+       nebula = 星云片的色（靛紫，极低 alpha 叠上去）
+       star   = 星点亮度基准（不是纯白 —— 纯白星点在小尺寸下会糊成一团） */
+  /* 2026-09-01 二轮调色：首版 nebula 是 96,84,200（明确的紫）且 alpha 给到 0.26，
+     两片叠起来把整个球染紫，用户反馈"太紫、没星空感"。
+     改成偏青的蓝 70,110,190 —— 真实夜空的色偏来自大气散射，是蓝而不是紫。
+     deep/mid 也一并从"紫黑"转"蓝黑"（B 通道明确高于 R）。 */
+  --c-ball-deep-rgb: 8, 12, 24;
+  --c-ball-mid-rgb: 20, 30, 58;
+  --c-ball-nebula-rgb: 70, 110, 190;
+  --c-ball-star-rgb: 226, 232, 255;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -150,6 +169,16 @@
   --c-white-rgb: 0, 0, 0;
   --c-black: #ffffff;
   --c-black-rgb: 255, 255, 255;
+
+  /* ⚠️ 坑 ④：星空在浅色主题下**仍然是夜空**，不能跟着翻成白底。
+     翻过来就成了"白球上撒黑点"，星空这个概念直接没了。
+     但可以整体提亮成**暮色**（黄昏刚起星的天色），让它在浅色桌面上
+     不至于是一块突兀的黑洞：deep/mid 提亮约一倍，星点相应压暗一档，
+     否则高亮星点配浅底会失去闪的对比。 */
+  --c-ball-deep-rgb: 34, 44, 76;
+  --c-ball-mid-rgb: 54, 70, 112;
+  --c-ball-nebula-rgb: 108, 148, 220;
+  --c-ball-star-rgb: 248, 250, 255;
 }
 
 /* Tauri 透明窗口的关键：任何祖先元素有不透明背景就会整块糊住，
@@ -1081,4 +1110,478 @@ body {
 .tab-panel::-webkit-scrollbar-track,
 .search-results::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* ─────────────────────── 球态悬浮窗（2026-09-01） ───────────────────────
+   用户要"圆球 + 点击展开 + 5s 左右旋转切换 + 立体感 + 内部纵深"。
+
+   为什么全靠 CSS 而不上 WebGL/canvas：球只有 112px 且内容是两行文字，
+   真 3D 的收益全在光照上，而光照用 2~3 层偏心径向渐变就能骗过眼睛；
+   canvas 反而要自己处理 devicePixelRatio、文字排版和主题切换。
+
+   ⚠️ 不能用 backdrop-filter 做玻璃感。悬浮窗是透明窗口，
+   backdrop-filter 采不到桌面像素（只能采同一合成上下文内的页面内容），
+   结果是一团灰雾。立体感全部由"实色半透明 + 多层 inset 阴影"堆出来。 */
+
+.ball-wrap {
+  position: relative;
+  border-radius: 50%;
+  /* perspective 给文字层的 rotateY 提供透视，否则旋转是平面的仿射变换、
+     看起来像被横向压扁而不是转过去。
+     600px 约等于球直径的 5 倍 —— 再小会夸张到变形，再大则透视效果消失 */
+  perspective: 600px;
+  /* 让子层的 3D 变换在同一空间里合成，而不是各自先拍平 */
+  transform-style: preserve-3d;
+  /* 球是圆的，方形窗口四角必须能穿透点击，否则"角上点一下也展开" */
+  cursor: pointer;
+  /* 文字不透明度沿用列表模式的语义（--opacity-text 作用在内容上） */
+  opacity: var(--opacity-text);
+}
+
+/* 主球面。偏心径向渐变把光源放在左上 30%/26% 处 ——
+   正中心的渐变会让球看起来像个发光的圆盘，偏心才有"球"的朝向。
+   末端那圈比中段更暗，是球体边缘因法线偏离视线而变暗的效果（terminator）。 */
+.ball-body {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    /* 星云片：两块极淡的靛紫，一大一小、偏离球心。
+       它们是"深邃"的真正来源 —— 纯深蓝底加白点只会像撒了盐，
+       有了浓淡不均的色雾，眼睛才读出"望进去很远"。
+       放在主渐变**之前**（CSS 里靠前 = 叠在上层）。 */
+    radial-gradient(
+      ellipse 62% 48% at 68% 32%,
+      rgba(var(--c-ball-nebula-rgb), 0.15) 0%,
+      rgba(var(--c-ball-nebula-rgb), 0.06) 46%,
+      transparent 74%
+    ),
+    radial-gradient(
+      ellipse 52% 62% at 26% 74%,
+      rgba(var(--c-ball-nebula-rgb), 0.1) 0%,
+      transparent 68%
+    ),
+    /* 主球面渐变。⚠️ 必须**同心** `50% 50%`，不能偏心。
+       偏心渐变（原来是 30%/26%）在圆形元素上必然让距光心最远的右下角
+       吃到最深色标 —— 那就是用户三轮反馈的"右下有阴影/渐变末端"。
+       前两轮降 alpha（1.0→0.88）、推色标（72%→82%）都只是让那块变浅，
+       几何结构没动，所以一直还在。
+       同心之后暗部变成均匀的一圈**暗角**，圆形物体的纵深本来就该是同心的。
+       「光源在左上」这个信息交给 .ball-gloss 高光层表达，那才是它的职责。 */
+      radial-gradient(
+        circle at 50% 50%,
+        rgba(var(--c-ball-mid-rgb), 0.98) 0%,
+        rgba(var(--c-ball-mid-rgb), 0.94) 34%,
+        /* ⚠️ 末端**不能是 alpha 1.0** —— 那是右下暗块的主体成因。
+           实心色不透明，星点画在它下面时完全不可能透出来；而右下正是距
+           光源 30%/26% 最远的点，整片落在不透明段上。
+           82% 起步（原 72%）+ 末端 0.88：暗面还在，但缩小了面积且留有透光。 */
+        rgba(var(--c-ball-deep-rgb), 0.94) 82%,
+        rgba(var(--c-ball-deep-rgb), 0.88) 100%
+      );
+  /* 背景板不透明度作用在球面上，与文字层互不影响（沿用 D2 的分层语义）。
+     调到 0 时球面消失但文字与高光仍在 —— 与列表模式下"背景透明、
+     文字仍清晰"的行为一致。 */
+  opacity: var(--opacity-bg);
+  box-shadow:
+    /* 外缘一圈极细亮边：球体被环境光勾边，没有它球会"糊"在桌面上 */
+    0 0 0 0.5px rgba(var(--c-white-rgb), 0.1),
+    /* 内收暗角 = 球缘的体积感。⚠️ 偏移必须是 `0 0`（均匀），不能带方向。
+       原来是 `-6px -8px` 朝右下，与偏心渐变叠在同一个角上 ——
+       两者共同造成用户三轮反馈的右下暗块。同心后暗角绕整圈均匀分布。
+       也不能用纯黑（首版 rgba(0,0,0,0.55)），那会把星点对比度吃光。 */
+    inset 0 0 10px rgba(var(--c-ball-deep-rgb), 0.45),
+    /* 左上内高光 = 受光面 */
+    inset 4px 5px 12px rgba(var(--c-white-rgb), 0.07);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 星点层。两层结构：外层 .ball-stars 只管慢自转，内层 .ball-stars-inner
+ * 管星图与闪烁。
+ *
+ * 为什么必须拆两层：一个元素上的 `transform` 是**单一属性**，
+ * 没法同时挂"150s 自转"和"4.3s 闪烁"两条独立周期的动画
+ * （后声明的会整条覆盖前者）。自转放外层、闪烁用 opacity 放内层，
+ * 两者互不干扰，且都是合成层属性 —— 不触发重排重绘。
+ *
+ * 星图技法参考 Parallax Star background in CSS（Saransh Sinha）：
+ * https://gist.github.com/kurisubrooks/7b3136e3852fb9aaf84f
+ * 单个 1px 元素用 box-shadow 列 N 组坐标铺出 N 颗星，
+ * ::before / ::after 用 `box-shadow: inherit` **白拿同一份星图**，
+ * 各自再 rotate + scale 错开 → 14 组坐标得 42 颗星，
+ * 且三层分布自动不重合（旋转过的星图不可能与原图叠在一起）。
+ *
+ * 分层错开闪烁周期的做法参考 Pure CSS night sky 与
+ * georgiee/stargazers-twinkling-sky。但那两处是在 keyframes 里改
+ * box-shadow 本身把星色切成 transparent —— **这里不采纳**：
+ * box-shadow 不上合成层，每帧重绘，常驻桌面不合适。只动 opacity。 */
+.ball-stars {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  /* 星点画在圆外时必须裁掉（自转时尤其明显，否则会看到方角） */
+  overflow: hidden;
+  /* 慢自转：150s 一圈。圆形容器里旋转半径不变，星点不会穿出球缘。
+     ⚠️ 周期从 150s 改到 50s：150s 换算下来最外圈星点只走 1.09 px/s，
+     而人眼察觉匀速运动的阈值约 0.5~1 px/s —— 技术上在动，读起来是静止的，
+     用户反馈"感觉不到动效"。50s = 3.27 px/s，明确可感但仍从容。 */
+  animation: ball-drift 50s linear infinite;
+}
+
+/* 星图本体。1px 见方，靠 box-shadow 把自己复制成一片星空。
+   坐标偏移全部乘 var(--scale)（appearance.ts 注入），所以放大球时
+   星点跟着散开而不是聚在中心留下一圈空白。
+   基准球径 60px → 星点分布在中心 ±26px 内，留 4px 余量给球缘暗部。 */
+.ball-stars-inner {
+  position: absolute;
+  /* 定位到球心：box-shadow 的偏移量以此为原点 */
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: 1px;
+  border-radius: 50%;
+  background: transparent;
+  /* 14 组坐标。位置手工错开成不规则分布 —— 均匀网格一眼看得出是贴图。
+     第三个值是 blur：0 出硬点（远星），0.5~1px 出柔点（近星带辉光）。 */
+  box-shadow:
+    calc(-19px * var(--scale)) calc(-14px * var(--scale)) 0.6px
+      rgba(var(--c-ball-star-rgb), 0.95),
+    calc(11px * var(--scale)) calc(-21px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.62),
+    calc(23px * var(--scale)) calc(-5px * var(--scale)) 0.5px
+      rgba(var(--c-ball-star-rgb), 0.88),
+    calc(6px * var(--scale)) calc(9px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.55),
+    calc(18px * var(--scale)) calc(17px * var(--scale)) 0.6px
+      rgba(var(--c-ball-star-rgb), 0.92),
+    calc(-8px * var(--scale)) calc(22px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.58),
+    calc(-22px * var(--scale)) calc(8px * var(--scale)) 0.5px
+      rgba(var(--c-ball-star-rgb), 0.85),
+    calc(-13px * var(--scale)) calc(-2px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.5),
+    calc(3px * var(--scale)) calc(-9px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.66),
+    calc(15px * var(--scale)) calc(3px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.52),
+    calc(-4px * var(--scale)) calc(14px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.6),
+    calc(-16px * var(--scale)) calc(19px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.48),
+    calc(21px * var(--scale)) calc(-14px * var(--scale)) 0
+      rgba(var(--c-ball-star-rgb), 0.56),
+    calc(-11px * var(--scale)) calc(-20px * var(--scale)) 0.5px
+      rgba(var(--c-ball-star-rgb), 0.8);
+  /* 主层闪烁：4.3s。三层周期取 4.3 / 6.1 / 7.7 —— 互质，
+     不会同步成"整体一起明一起暗"的脉动（那看着像故障而不是星空）。 */
+  animation: ball-twinkle-a 4.3s ease-in-out infinite;
+}
+
+/* 第二、三层星：box-shadow: inherit 白拿主层那 14 组坐标，
+   再各自 rotate + scale 错开位置。
+   ⚠️ 必须同时 scale：只 rotate 的话所有星点到球心距离不变，
+   三层会呈现出明显的"同心圆分布"，反而比单层更假。 */
+.ball-stars-inner::before,
+.ball-stars-inner::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  border-radius: 50%;
+  box-shadow: inherit;
+}
+
+.ball-stars-inner::before {
+  /* 137deg 是刻意选的非特殊角：90/120/180 这类角度会让部分星点
+     与主层重合或形成对称，看得出是同一份图转出来的 */
+  transform: rotate(137deg) scale(0.78);
+  animation: ball-twinkle-b 6.1s ease-in-out infinite;
+}
+
+.ball-stars-inner::after {
+  transform: rotate(241deg) scale(0.56);
+  animation: ball-twinkle-c 7.7s ease-in-out infinite;
+}
+
+/* 慢自转。只转不缩不移 —— 圆形容器内旋转不改变任何星点到球心的距离，
+   所以不会出现"星点转出球外又转回来"的闪烁。 */
+@keyframes ball-drift {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 三条闪烁。振幅刻意收窄（0.55~1 而不是 0~1）：
+   常驻桌面的东西闪到全灭会烦人，而且星点全消失那一刻球会显得空。
+   相位也错开（各层峰值落在不同百分比），进一步避免同步。
+   ⚠️ 这三条**不能合并成一条**再用 animation-delay 错开 ——
+   ::before / ::after 的 transform 是静态的 rotate+scale，
+   而 keyframes 若含 transform 会覆盖它，星点位置会跳回主层。
+   所以每条只动 opacity，绝不碰 transform。 */
+@keyframes ball-twinkle-a {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.34;
+  }
+}
+
+@keyframes ball-twinkle-b {
+  0%,
+  100% {
+    opacity: 0.72;
+  }
+  38% {
+    opacity: 1;
+  }
+  72% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes ball-twinkle-c {
+  0%,
+  100% {
+    opacity: 0.42;
+  }
+  26% {
+    opacity: 0.95;
+  }
+  64% {
+    opacity: 0.55;
+  }
+}
+
+/* 内部深层。用户要"里面有深层的那种感觉" ——
+   这一层比球面小一圈并往里收，形成"透过球壳看到内部还有一个核"的错觉。
+   关键是 inset 阴影方向与球面**相反**（亮在右下、暗在左上）：
+   内壁受到的光正是从球面另一侧折进来的，方向相反才像中空的玻璃球。 */
+.ball-core {
+  position: absolute;
+  /* 12% 内缩：留出的那一圈就是"球壳厚度" */
+  inset: 12%;
+  border-radius: 50%;
+  pointer-events: none;
+  background:
+    /* 换成星空色系：原来用 --c-bg-* 的中性灰，铺在蓝紫球面上会发灰、
+       把星空的色偏冲淡。mid 提供内核的微亮，nebula 让内核也带一点色雾。 */
+    radial-gradient(
+      circle at 62% 70%,
+      rgba(var(--c-ball-nebula-rgb), 0.2) 0%,
+      rgba(var(--c-ball-mid-rgb), 0.34) 55%,
+      transparent 78%
+    );
+  box-shadow:
+    /* 同样避开纯黑：内核的暗部叠在球面暗面上，两层纯黑相加就是右下那块死黑 */
+    inset 3px 4px 10px rgba(var(--c-ball-deep-rgb), 0.3),
+    inset -2px -3px 8px rgba(var(--c-white-rgb), 0.05);
+  /* 内层比外层更透一点，让"深度"是渐进的而不是硬叠两个圆 */
+  opacity: calc(var(--opacity-bg) * 0.85);
+}
+
+/* 镜面高光。一小片椭圆放在左上，让表面像玻璃而不是磨砂。
+   必须是椭圆且带旋转：正圆高光看起来像贴了个白点。 */
+.ball-gloss {
+  position: absolute;
+  left: 17%;
+  top: 12%;
+  width: 40%;
+  height: 26%;
+  border-radius: 50%;
+  pointer-events: none;
+  transform: rotate(-18deg);
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    rgba(var(--c-white-rgb), 0.34) 0%,
+    rgba(var(--c-white-rgb), 0.13) 42%,
+    transparent 72%
+  );
+  filter: blur(0.5px);
+}
+
+/* 文字层（名称 + 涨跌幅）。
+   key 绑索引 → 换股票时节点重建 → 下面的 animation 每次都重放。 */
+/* 水晶球内旋转的"轴"。两面都挂在这上面，共享一个 3D 空间与透视中心。
+   为什么需要这层容器：两面各自 rotateY 时必须绕**同一根轴**转，
+   否则各转各的、读起来是两个独立的翻牌而不是一块牌子转过去。
+   perspective 放在这里而不是继承 .ball-wrap 的：轴心要落在球心，
+   与星点自转的中心重合，两个动效才在同一个"球内空间"里。 */
+/* 裁剪层。滚动播放时两面会滑到球外，必须裁在圆内，否则能看到牌子跑出球面。
+   ⚠️ 单独一层的原因：`overflow: hidden` 会**强制拍平 3D 上下文**，
+   不能与 `transform-style: preserve-3d` 放在同一个元素上
+   （放一起的话内层的 rotateY 会退化成平面仿射变换，曲面暗示全丢）。
+   所以裁剪在外层、3D 在内层 .ball-spindle。 */
+.ball-viewport {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border-radius: 50%;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 滚动轨道。两面都挂在这上面，共享同一个透视中心。
+   perspective 留在这里（而不是继承 .ball-wrap 的 600px）：
+   透视中心要落在球心，与星点自转的中心重合，
+   平移时那点 rotateY 才像是贴着球面走而不是在球前面滑。 */
+.ball-spindle {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  perspective: 520px;
+  pointer-events: none;
+}
+
+.ball-face {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  /* 行距压紧：两行字要落在球的中央区域，松了会顶到球缘的暗部 */
+  gap: 1px;
+  /* ⚠️ 稳态**不能挂 translateZ** —— 用户反馈"字有些模糊"，根因在此。
+     父层 .ball-wrap 有 perspective: 600px，往后推 6px 等于缩放到
+     600/606 ≈ 99.0%。非整数倍缩放让字形落在半像素上 → 发虚，
+     9px/11px 这种小字号最吃这个。而动画 to 段原来也停在 -6px，
+     所以动画结束后是**一直**虚着，不是只在转的过程中虚。
+     代价：字不再往球壳内侧凹那 6px，观感上更贴表面 —— 换清晰值得。
+     旋转过程中的 translateZ 保留在 keyframes 里，那是动效需要的前后位移，
+     且过程中本来就在动，虚化看不出来。 */
+  /* 旋转时保持 3D 上下文，否则子元素会被提前拍平 */
+  transform-style: preserve-3d;
+  /* ⚠️ 动画**不在这里** —— 移到 .is-entering / .is-leaving 上。
+     转场期间两面同框，各自转不同的方向，共用一条动画就同步了。
+     背面不可见：转过 90° 后该面朝向背离镜头，不隐藏会看到镜像的字叠在新面上。 */
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  /* 左右留白，长名称不要贴到球缘 */
+  padding: 0 12%;
+  box-sizing: border-box;
+}
+
+/* 转进来的那一面：从 +82° 转到 0。
+   82° 而不是 90°：正 90° 时该面完全侧对镜头（投影宽度为 0），
+   前几帧是纯空白，观感是"闪出来"而不是"转进来"。 */
+.ball-face.is-entering {
+  animation: ball-face-in var(--ball-rotate-ms, 620ms)
+    cubic-bezier(0.28, 0.72, 0.22, 1) both;
+}
+
+/* 转出去的那一面：从 0 转到 -82°，与转进的方向连续 ——
+   两面合起来读作"同一块牌子绕轴转过去了 164°"，
+   而不是"一个消失、一个出现"。 */
+.ball-face.is-leaving {
+  animation: ball-face-out var(--ball-rotate-ms, 620ms)
+    cubic-bezier(0.28, 0.72, 0.22, 1) both;
+}
+
+/* ⚠️ opacity 收在两端而不是全程 1：转到接近侧对时该面在真实世界里
+   会被球体的曲面折射掩掉，纯几何旋转看起来像硬纸板。
+   但也不能早早淡出（那又变回"消失出现"），所以只在最后 30% 才开始收。 */
+/* 新面：从右侧滑入。
+   ⚠️ **全程 opacity: 1**，不写任何淡入 —— 上一版起止 alpha 是 0.15，
+   那等于在几何空档之外又叠了一次"消失出现"，正是用户反馈的问题。
+   滚动播放靠位移读出连续性，不靠透明度。
+
+   translateX(100%) 是整整一个身位：与旧面的 -100% 恰好首尾相接，
+   任意时刻两面覆盖的横向区间之和 = 一个球宽，球心永远被占满。
+
+   叠 16° rotateY（远小于上一版的 82°）：幅度小到不会侧对镜头，
+   只让平移看起来贴在球面上而不是一块平板在滑。 */
+@keyframes ball-face-in {
+  from {
+    transform: translateX(100%) rotateY(16deg);
+  }
+  to {
+    transform: translateX(0) rotateY(0deg);
+  }
+}
+
+/* 旧面：滑出左侧。同样全程不透明 —— 它是被新面推出画面的，不是淡掉的。
+   -100% 与新面的 +100% 首尾相接，两面同速同向，读作一条连续的带子在走。 */
+@keyframes ball-face-out {
+  from {
+    transform: translateX(0) rotateY(0deg);
+  }
+  to {
+    transform: translateX(-100%) rotateY(-16deg);
+  }
+}
+
+/* 旧的单面淡入动画。保留定义但已无引用者 —— 首帧挂载走 .is-entering。
+   留着是因为 @keyframes 无副作用，删它属于无关改动；
+   若后续确认不需要，连同这段注释一起删。
+
+   左右旋转切换：新的一面从右侧转进来。
+   为什么从 62deg 而不是 90deg 起：90deg 时该面完全侧对镜头（宽度压到 0），
+   前几帧是空白，观感像"闪一下"而不是"转过来"。62deg 保留约一半可见宽度，
+   动画一开始就能看到内容在转。
+
+   同时带一点 translateZ：转动时球面上的点本身有前后位移，
+   只转不移会像"贴在玻璃上的纸片在打转"。 */
+@keyframes ball-spin-in {
+  from {
+    opacity: 0;
+    transform: perspective(600px) rotateY(62deg) translateZ(-26px);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+    /* 归零到 none 而不是 translateZ(-6px)：落点必须与稳态一致，
+       否则动画结束的那一帧字会"跳"一下，且之后一直停在被缩放 99% 的模糊态 */
+    transform: none;
+  }
+}
+
+.ball-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+  /* 名称是次要信息，压一档亮度让涨跌幅成为视觉重心 */
+  letter-spacing: 0.2px;
+  /* 深色球面上加一点暗投影，避免字与球面亮部对比不足 */
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.ball-percent {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  /* 颜色由内联 style 给（红涨绿跌按市场语义，走 lib/colors.ts） */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+  line-height: 1.15;
+}
+
+/* 球态下隐藏方形背景板。
+   它是列表模式的圆角矩形底，球态留着会在球外围出现一个方框。 */
+.app.is-ball .bg-layer {
+  display: none;
+}
+
+/* 球态下内容层不要 padding：球是固定尺寸的圆，
+   padding 会让 ResizeObserver 量到 60+2×padding，窗口比球大一圈，
+   表现为球周围有一圈可拖动但看不见的区域。 */
+.app.is-ball .content-layer {
+  padding: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ball-face {
+    animation: none;
+  }
 }

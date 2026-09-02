@@ -933,3 +933,114 @@ fn v5_appearance_with_theme_light_round_trips() {
         Some(tickerglass_lib::config::Theme::Light)
     );
 }
+
+// ─────────── window.collapsed 段（球态悬浮窗，2026-09-01 新增）───────────
+//
+// 与 theme / base_price 同一个套路：`Option<bool>` + `#[serde(default)]`，
+// 旧配置缺字段时补 `None`。**必须测**，因为这里 `None` 的业务语义是
+// "球态"（true），与 `bool::default()`（false）相反 —— 任何地方误用
+// `unwrap_or_default()` 都会让老用户升级后直接看到展开的列表。
+
+fn v5_json_window_without_collapsed() -> String {
+    serde_json::json!({
+        "schemaVersion": 5,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false}
+        ],
+        "window": {
+            // 老配置的 window **没有** collapsed 字段
+            "x": 120,
+            "y": 240,
+            "always_on_top": false,
+            "locked": true
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn v5_window_without_collapsed_loads_as_none() {
+    let r = migrate(&v5_json_window_without_collapsed());
+    assert_eq!(
+        r.config.window.collapsed, None,
+        "缺 collapsed 字段应补 None，而不是报错或落成 Some(false)"
+    );
+}
+
+#[test]
+fn missing_collapsed_means_ball_not_expanded() {
+    // 这条是整段的**核心**：None 必须解读成球态。
+    // 若哪天有人把 is_collapsed() 改成 unwrap_or_default()，这里立刻红。
+    let r = migrate(&v5_json_window_without_collapsed());
+    assert!(
+        r.config.window.is_collapsed(),
+        "None 的语义是球态（true），不是 bool::default() 的 false"
+    );
+}
+
+#[test]
+fn v5_window_without_collapsed_keeps_existing_fields() {
+    // 加字段不能动到老字段 —— 用户的位置/置顶/锁定必须原样在
+    let r = migrate(&v5_json_window_without_collapsed());
+    let w = &r.config.window;
+    assert_eq!(w.x, Some(120));
+    assert_eq!(w.y, Some(240));
+    assert!(!w.always_on_top);
+    assert!(w.locked);
+}
+
+#[test]
+fn explicit_collapsed_false_stays_expanded() {
+    // 用户手动展开过（或手改配置），必须尊重 —— 不能被 None 的默认值覆盖回球态
+    let json = serde_json::json!({
+        "schemaVersion": 5,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false}
+        ],
+        "window": { "collapsed": false }
+    })
+    .to_string();
+    let r = migrate(&json);
+    assert_eq!(r.config.window.collapsed, Some(false));
+    assert!(
+        !r.config.window.is_collapsed(),
+        "显式 false 必须保持展开态"
+    );
+}
+
+#[test]
+fn explicit_collapsed_true_round_trips() {
+    let json = serde_json::json!({
+        "schemaVersion": 5,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false}
+        ],
+        "window": { "collapsed": true }
+    })
+    .to_string();
+    let r = migrate(&json);
+    assert_eq!(r.config.window.collapsed, Some(true));
+    assert!(r.config.window.is_collapsed());
+}
+
+#[test]
+fn collapsed_field_does_not_bump_schema_version() {
+    // 加 Option 字段不需要迁移，所以版本号不该变（与 theme / refresh 同理）
+    let r = migrate(&v5_json_window_without_collapsed());
+    assert_eq!(r.outcome, LoadOutcome::Current, "加 Option 字段不该触发迁移");
+    assert_eq!(r.config.schema_version, SCHEMA_VERSION);
+    assert!(
+        !r.outcome.needs_backup(),
+        "补一个 Option 字段不是损坏，不该触发备份"
+    );
+}
+
+#[test]
+fn default_window_config_is_ball() {
+    // 全新用户（无配置文件）也该看到球 —— 这是 2026-09-01 起的主形态
+    let cfg = AppConfig::default();
+    assert!(
+        cfg.window.is_collapsed(),
+        "默认配置应为球态"
+    );
+}

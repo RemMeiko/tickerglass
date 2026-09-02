@@ -100,6 +100,16 @@ export async function setAlwaysOnTop(enabled: boolean): Promise<AppConfig> {
   return invoke<AppConfig>("set_always_on_top", { enabled });
 }
 
+/**
+ * 切换悬浮窗形态：球态 ↔ 展开列表。
+ *
+ * 后端**不改窗口尺寸** —— 尺寸仍由 App 的 ResizeObserver 测内容后
+ * 走 resizeMainWindow 上报（D4 单一真源）。
+ */
+export async function setCollapsed(collapsed: boolean): Promise<AppConfig> {
+  return invoke<AppConfig>("set_collapsed", { collapsed });
+}
+
 export async function setLocked(locked: boolean): Promise<AppConfig> {
   return invoke<AppConfig>("set_locked", { locked });
 }
