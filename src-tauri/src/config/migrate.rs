@@ -24,12 +24,21 @@ pub enum LoadOutcome {
     FutureVersion { found: u32 },
     /// 文件损坏（非法 JSON / 根节点不是对象 / 空文件）→ 用默认配置，调用方须备份原文件
     Corrupted { reason: String },
+    /// 主文件损坏但备份救回来了（v0.3.0 备份机制）。
+    ///
+    /// `reason` 是主文件的损坏原因（供日志）。这个状态下配置**已经可用**，
+    /// 调用方（store）负责把损坏原文另存 `.corrupt` 并把恢复结果写回主文件。
+    /// 与 `Corrupted` 的本质区别：**用户数据没丢**，提示文案也因此不同。
+    RecoveredFromBackup { reason: String },
 }
 
 impl LoadOutcome {
-    /// 是否需要把用户原文件备份为 `.bak`。只有损坏才需要。
+    /// 是否需要把用户原文件另存（`.corrupt`）。损坏与备份恢复都要留原文供排查。
     pub fn needs_backup(&self) -> bool {
-        matches!(self, LoadOutcome::Corrupted { .. })
+        matches!(
+            self,
+            LoadOutcome::Corrupted { .. } | LoadOutcome::RecoveredFromBackup { .. }
+        )
     }
 
     /// 是否需要把净化后的配置写回磁盘（迁移与损坏都要落盘固化）。
@@ -49,7 +58,13 @@ impl LoadOutcome {
                  部分新版设置可能不生效"
             )),
             LoadOutcome::Corrupted { .. } => Some(
-                "配置文件损坏，已备份为 config.json.bak 并恢复默认设置".to_string(),
+                "配置文件损坏且备份不可用，已恢复默认设置（损坏原文保留为 config.json.corrupt）"
+                    .to_string(),
+            ),
+            LoadOutcome::RecoveredFromBackup { .. } => Some(
+                "配置文件异常，已自动从备份恢复，自选股与设置均已保留\
+                 （损坏原文保留为 config.json.corrupt）"
+                    .to_string(),
             ),
         }
     }
@@ -125,6 +140,7 @@ fn apply_chain(value: &mut Value, from: u32) {
             2 => migrate_v2_to_v3(value),
             3 => migrate_v3_to_v4(value),
             4 => migrate_v4_to_v5(value),
+            5 => migrate_v5_to_v6(value),
             // 未知的中间版本不做结构改动，靠 serde default 补字段
             _ => {}
         }
@@ -152,6 +168,34 @@ fn migrate_v1_to_v2(value: &mut Value) {
     // 是因为 apply_chain 用自己的计数器驱动循环、且末尾会统一覆盖该字段，
     // 但下一个加 v4 的人若改用 Value 里的版本号判断就会踩空。
     obj.insert("schemaVersion".to_string(), Value::Number(2.into()));
+}
+
+/// v5 → v6：图表配置（`charts.ma_periods`）+ 悬浮窗资金流开关
+/// （`appearance.show_fund_flow`）。
+///
+/// 两个字段都有 serde default（`[5,20]` / `true`），结构上不补也能加载 ——
+/// 这里显式补是为了让写回磁盘的文件**字段齐全**，用户手改配置时能看到
+/// 这两个可调项的存在（与 v4→v5 补 `hidden` 同一理由）。
+/// v5 用户升级后的观感不变：均线还是 MA5/20，资金流默认显示是 v0.3.0
+/// 的新功能而非既有行为的改变。
+fn migrate_v5_to_v6(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if !obj.contains_key("charts") {
+        obj.insert(
+            "charts".to_string(),
+            serde_json::json!({ "ma_periods": [5, 20] }),
+        );
+    }
+    let appearance = obj
+        .entry("appearance".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(a) = appearance.as_object_mut() {
+        if !a.contains_key("show_fund_flow") {
+            a.insert("show_fund_flow".to_string(), Value::Bool(true));
+        }
+    }
 }
 
 fn json_kind(v: &Value) -> &'static str {

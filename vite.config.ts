@@ -22,6 +22,7 @@ export default defineConfig({
         chart: resolve(__dirname, "chart.html"),
         market: resolve(__dirname, "market.html"),
         popup: resolve(__dirname, "popup.html"),
+        flowtip: resolve(__dirname, "flowtip.html"),
       },
     },
   },

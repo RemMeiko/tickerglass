@@ -36,6 +36,19 @@ export function formatSignedMoney(yuan: number, digits = 2): string {
   return yuan > 0 ? `+${s}` : s;
 }
 
+/**
+ * 紧凑金额（悬浮窗行内资金流用）：不带单位后缀空格，亿两位/万零位小数。
+ * `+1.25亿` / `-8464万` —— 行内空间有限，长文案会把价格列挤走。
+ */
+export function formatFlowCompact(yuan: number): string {
+  if (!Number.isFinite(yuan)) return "—";
+  const sign = yuan > 0 ? "+" : "";
+  const abs = Math.abs(yuan);
+  if (abs >= YI) return `${sign}${(yuan / YI).toFixed(2)}亿`;
+  if (abs >= WAN) return `${sign}${(yuan / WAN).toFixed(0)}万`;
+  return `${sign}${yuan.toFixed(0)}`;
+}
+
 /** 涨跌幅，显式带符号。 */
 export function formatPercent(p: number, digits = 2): string {
   if (!Number.isFinite(p)) return "—";

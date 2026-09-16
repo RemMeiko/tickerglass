@@ -15,12 +15,81 @@ import type {
   WatchItem,
 } from "./types";
 import { displayCode } from "./lib/format";
+import { updateMaPeriods } from "./lib/ipc";
 
 const PERIODS: { key: ChartPeriod; label: string }[] = [
   { key: "intraday", label: "分时" },
   { key: "5day", label: "5 日" },
   { key: "dayk", label: "日 K" },
 ];
+
+/** 与 CandleChart 的 MA_PALETTE 保持一致（图例颜色 = 线颜色） */
+const MA_PALETTE = [
+  "#e8b64c",
+  "#5b9bd5",
+  "#c77dff",
+  "#7fd18c",
+  "#f2907b",
+  "#8fc9e8",
+  "#d5b899",
+  "#a0a8b8",
+];
+
+/**
+ * 日K 均线编辑器（v0.3.0 需求 4）：周期 chips（点 × 移除）+ 输入框（回车/按钮添加）。
+ *
+ * 校验全在后端（update_ma_periods → sanitize：区间 2~250、去重、≤8 条），
+ * 返回的配置再经 config 事件广播回来 —— 这里不自己校验，
+ * 避免"前端放行、后端钳掉"时图例与实画不一致的两套真值。
+ */
+function MaEditor({
+  periods,
+  onChange,
+}: {
+  periods: number[];
+  onChange: (next: number[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const add = () => {
+    const n = Number.parseInt(draft.trim(), 10);
+    setDraft("");
+    // 非法输入交给后端钳制后**原样返回旧列表**，图例自然不变；
+    // 这里只拦明显无意义的（NaN），不拦 2~250 之外的 —— 那是后端的职责
+    if (!Number.isFinite(n)) return;
+    onChange([...periods, n]);
+  };
+  return (
+    <div className="ma-editor" title="均线周期：点 × 移除，输入数字后回车添加（2~250，最多 8 条）">
+      {periods.map((p, i) => (
+        <button
+          key={p}
+          type="button"
+          className="ma-chip"
+          style={{ color: MA_PALETTE[i % MA_PALETTE.length] }}
+          onClick={() => onChange(periods.filter((x) => x !== p))}
+          title={`移除 MA${p}`}
+        >
+          MA{p}
+          <span className="ma-x">×</span>
+        </button>
+      ))}
+      <span className="ma-add">
+        <input
+          value={draft}
+          inputMode="numeric"
+          placeholder="+周期"
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") add();
+          }}
+        />
+        <button type="button" onClick={add}>
+          加
+        </button>
+      </span>
+    </div>
+  );
+}
 
 /** 当日分时 30s 一刷；日K/5日 是历史数据，不自动刷 */
 const INTRADAY_REFRESH_MS = 30_000;
@@ -48,7 +117,18 @@ export default function ChartApp() {
   // 主题：本窗口是独立 WebView，有自己的 document，
   // 所以必须自己挂一次 data-theme（设置窗写的不会传过来）。
   // 返回值往下传给两个 Canvas 图表 —— 它们的涨跌上色走 JS，CSS token 覆盖不到。
-  const theme = useTheme(useConfig());
+  const config = useConfig();
+  const theme = useTheme(config);
+
+  // 日K 均线周期（v0.3.0 需求 4）。真值在后端配置里 —— config 事件到了就覆盖本地值；
+  // 后端 sanitize 过的列表（升序去重）才是实际会画的线
+  const [maPeriods, setMaPeriods] = useState<number[]>(
+    config?.charts?.ma_periods ?? [5, 20]
+  );
+  useEffect(() => {
+    const p = config?.charts?.ma_periods;
+    if (p && p.length > 0) setMaPeriods(p);
+  }, [config]);
 
   // 首个标的由 URL query 带入，避免首帧不知道画谁而空转一轮
   const initialCode = useMemo(() => {
@@ -162,6 +242,8 @@ export default function ChartApp() {
             points: s.points.map((p) => ({
               slot: p.grid_index,
               price: p.price,
+              // 真实均价（v0.3.0）：后端按市场量纲算好，指数为 null
+              avg: p.avg ?? undefined,
               breakBefore: p.break_before,
               label: String(p.hhmm).padStart(4, "0").replace(/(\d{2})(\d{2})/, "$1:$2"),
             })),
@@ -252,15 +334,29 @@ export default function ChartApp() {
             </div>
           )}
           {!loading && !error && payload?.kind === "dailyK" && (
-            <CandleChart
-              bars={payload.bars}
-              ma5={payload.ma5}
-              ma20={payload.ma20}
-              market={market}
-              width={size.w}
-              height={size.h}
-              theme={theme}
-            />
+            <>
+              <MaEditor
+                periods={maPeriods}
+                onChange={(next) => {
+                  void updateMaPeriods(next)
+                    .then((cfg) => {
+                      // 立即用返回值刷图例（config 事件也会到，但先到先渲染）；
+                      // 同时重拉一次 —— 后端按新配置算均线，payload 里还是旧的
+                      setMaPeriods(cfg.charts.ma_periods);
+                      return load(true);
+                    })
+                    .catch((e) => console.error("更新均线配置失败:", e));
+                }}
+              />
+              <CandleChart
+                bars={payload.bars}
+                mas={payload.mas}
+                market={market}
+                width={size.w}
+                height={size.h}
+                theme={theme}
+              />
+            </>
           )}
           {!loading && !error && payload && payload.kind !== "dailyK" && (
             <IntradayLarge
@@ -277,8 +373,15 @@ export default function ChartApp() {
       </div>
 
       <footer className="chart-foot">
-        <span className="legend ma5">MA5</span>
-        <span className="legend ma20">MA20</span>
+        {maPeriods.map((p, i) => (
+          <span
+            key={p}
+            className="legend"
+            style={{ color: MA_PALETTE[i % MA_PALETTE.length] }}
+          >
+            MA{p}
+          </span>
+        ))}
         <span className="legend avg">均价</span>
         <span className="foot-note">
           数据来自公开行情接口，仅供个人参考，不构成投资建议

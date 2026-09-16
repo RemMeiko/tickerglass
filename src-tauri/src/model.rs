@@ -61,6 +61,12 @@ pub struct Quote {
     pub raw_timestamp: String,
     /// 报文时间戳解析结果（`HH:MM`），解析失败为 `None`
     pub quote_time: Option<String>,
+    /// 当日累计成交额（元）。腾讯报文 `[38]` 成交额（万元）×10000。
+    ///
+    /// `None` = 该报文不带此字段（美股/部分港股形态）。大盘面板的指数卡
+    /// 用它显示成交额；此前指数卡一直缺这一行（v0.3.0 需求 5 的一部分）。
+    #[serde(default)]
+    pub amount: Option<f64>,
 }
 
 /// 解析结果一等类型：解析不出来是一种明确状态，不靠 `unwrap_or(0.0)` 掩盖。
@@ -151,6 +157,27 @@ pub enum DataState {
     Error { message: String },
 }
 
+/// 单只标的的当日资金流（单位：元，净流入口径）。
+///
+/// 字段含义 2026-09-16 盘中实测认定（东财 `ulist.np`，恒等式全部成立）：
+/// - `main_net` = f62 主力净流入 = 超大单净 + 大单净
+/// - `retail_net` = f84 小单净流入（散户口径）
+/// - `medium_net` = f78 中单净流入
+/// - 恒等式：main + medium + retail ≈ 0（每笔买必有对应的卖）
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct FundFlow {
+    /// 主力净流入（超大单 + 大单，东财口径）
+    pub main_net: f64,
+    /// 小单净流入（散户）
+    pub retail_net: f64,
+    /// 中单净流入
+    pub medium_net: f64,
+    /// 超大单净流入
+    pub extra_large_net: f64,
+    /// 大单净流入
+    pub large_net: f64,
+}
+
 /// 一行的完整渲染数据。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RowSnapshot {
@@ -175,6 +202,10 @@ pub struct RowSnapshot {
     pub state: DataState,
     /// 分时序列本周期是否可用。false 时前端不画曲线（严禁补点伪造）
     pub minute_available: bool,
+    /// 当日资金流（v0.3.0 需求 6）。`None` = 无 secid / 该标的不供资金流 /
+    /// 本轮尚未取到。资金流是独立的慢速轮询链路，与 quote/minute 互不阻塞。
+    #[serde(default)]
+    pub fund_flow: Option<FundFlow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -21,6 +21,8 @@ export interface Quote {
   price_decimals: number | null;
   raw_timestamp: string;
   quote_time: string | null;
+  /** 当日累计成交额（元）。腾讯报文 [38] 万元×10000。null = 该报文不带 */
+  amount: number | null;
 }
 
 export interface MinutePoint {
@@ -55,7 +57,7 @@ export interface RowSnapshot {
   is_index: boolean;
   /**
    * 是否隐藏。**快照里保留隐藏行，过滤只发生在悬浮窗的渲染层** ——
-   * 设置页要用它显示名称与价格，提醒判定也要照常跑。
+   * 设置页要用它显示名称与价格，提醒判定也要照常。
    */
   hidden: boolean;
   name: string | null;
@@ -64,6 +66,24 @@ export interface RowSnapshot {
   state: DataState;
   /** false 时不画曲线。严禁用单点/昨收线/插值补假曲线 */
   minute_available: boolean;
+  /** 当日资金流（v0.3.0）。null = 无 secid / 该标的不供资金流 / 本轮未取到 */
+  fund_flow: FundFlow | null;
+}
+
+/** 单只标的当日资金流（元，净流入口径）。主力=超大+大，散户=小单 */
+export interface FundFlow {
+  main_net: number;
+  retail_net: number;
+  medium_net: number;
+  extra_large_net: number;
+  large_net: number;
+}
+
+/** 悬停资金流提示窗（flowtip）的内容载荷 */
+export interface FlowTipPayload {
+  main_net: number;
+  retail_net: number;
+  market: Market | null;
 }
 
 export interface Snapshot {
@@ -100,14 +120,10 @@ export interface AppearanceConfig {
   opacity_background: number;
   opacity_text: number;
   opacity_curve: number;
-  /**
-   * 界面主题。`null`/缺失 = 深色（与加这个字段之前的行为一致）。
-   *
-   * **只影响三个普通窗口**（设置窗/大图窗/大盘窗）与中心弹窗。
-   * 悬浮窗不做主题：它是透明窗口，铺浅色底就是桌面上一块白斑，
-   * 且它靠 `opacity_background` 调透明度，两套机制会打架。
-   */
+  /** 界面主题。`null`/缺失 = 深色（与加这个字段之前的行为一致）。悬浮窗不做主题 */
   theme: "dark" | "light" | null;
+  /** 悬浮窗行内是否显示主力/散户资金流（v0.3.0）。默认开 */
+  show_fund_flow: boolean;
 }
 
 /**
@@ -147,6 +163,11 @@ export interface WindowConfig {
   collapsed: boolean | null;
 }
 
+/** 日K 均线配置（v0.3.0）：升序去重、区间 2~250、≤8 条（后端 sanitize 强制） */
+export interface ChartConfig {
+  ma_periods: number[];
+}
+
 export interface AppConfig {
   schemaVersion: number;
   watchlist: WatchItem[];
@@ -154,6 +175,7 @@ export interface AppConfig {
   window: WindowConfig;
   alerts: AlertConfig;
   refresh: RefreshConfig;
+  charts: ChartConfig;
 }
 
 export interface SearchItem {
@@ -214,11 +236,17 @@ export interface DaySeries {
   points: DayMinutePoint[];
 }
 
+/** 一条均线的周期与逐根值（前 period-1 根为 null） */
+export interface MaLine {
+  period: number;
+  values: (number | null)[];
+}
+
 /** 大图窗一屏数据。后端按 kind 分派，前端据此选渲染器。 */
 export type ChartPayload =
   | { kind: "intraday"; series: MinuteSeries }
   | { kind: "fiveDay"; days: DaySeries[]; grid_len: number }
-  | { kind: "dailyK"; bars: KlineBar[]; ma5: (number | null)[]; ma20: (number | null)[] };
+  | { kind: "dailyK"; bars: KlineBar[]; mas: MaLine[] };
 
 export type ChartPeriod = "intraday" | "5day" | "dayk";
 

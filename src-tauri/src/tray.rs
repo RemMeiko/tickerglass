@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager};
 const ID_UNLOCK: &str = "unlock";
 const ID_SETTINGS: &str = "settings";
 const ID_MARKET: &str = "market";
+const ID_RESTART: &str = "restart";
 const ID_QUIT: &str = "quit";
 
 /// 构建托盘图标与菜单。在 `setup` 里调用一次。
@@ -23,9 +24,11 @@ pub fn build(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let market = MenuItem::with_id(app, ID_MARKET, "大盘…", true, None::<&str>)
         .map_err(|e| e.to_string())?;
+    let restart = MenuItem::with_id(app, ID_RESTART, "重启", true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let quit =
         MenuItem::with_id(app, ID_QUIT, "退出", true, None::<&str>).map_err(|e| e.to_string())?;
-    let menu = Menu::with_items(app, &[&unlock, &market, &settings, &quit])
+    let menu = Menu::with_items(app, &[&unlock, &market, &settings, &restart, &quit])
         .map_err(|e| e.to_string())?;
 
     let icon = app
@@ -72,6 +75,14 @@ pub fn build(app: &AppHandle) -> Result<(), String> {
                             log::error!("[托盘] 打开大盘窗失败: {e}");
                         }
                     });
+                }
+                ID_RESTART => {
+                    // 重启（v0.3.0 需求 3）。配置每次变更都即时落盘，
+                    // `restart()` 前不需要额外的冲刷动作。
+                    // 场景：数据通道卡死 / 改了系统代理 / 想清掉窗口异常状态 ——
+                    // 比退出再手动拉起省一步。
+                    log::info!("[托盘] 用户请求重启");
+                    app.restart();
                 }
                 ID_QUIT => {
                     log::info!("[托盘] 用户请求退出");

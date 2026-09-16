@@ -21,6 +21,9 @@ const IDX_CHG_AMOUNT: usize = 31;
 const IDX_CHG_PERCENT: usize = 32;
 const IDX_HIGH: usize = 33;
 const IDX_LOW: usize = 34;
+/// 成交额（万元）。2026-09-16 实测：上证指数与茅台的 `[38]` 均为万元
+/// （茅台 219045万 ↔ 分时接口累计额 2,190,454,599 元），×10000 折成元。
+const IDX_AMOUNT_WAN: usize = 38;
 
 fn field(fields: &[&str], i: usize) -> Option<String> {
     fields.get(i).map(|s| s.trim().to_string())
@@ -137,6 +140,7 @@ pub fn parse_line(line: &str) -> QuoteParseOutcome {
         price_decimals: decimals(&fields, IDX_PRICE),
         raw_timestamp,
         quote_time,
+        amount: num(&fields, IDX_AMOUNT_WAN).map(|wan| wan * 10_000.0),
     })
 }
 

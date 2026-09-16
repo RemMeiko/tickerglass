@@ -23,18 +23,19 @@ fn current_version_needs_no_backup_and_no_rewrite() {
 }
 
 #[test]
-fn schema_version_constant_is_five() {
+fn schema_version_constant_is_six() {
     // v1 = Sprint 1 隐式结构
     // v2 = 新增 appearance/window
     // v3 = 新增 alerts（牛熊提醒：全局阈值 + 逐股目标价 + 冷却期/卡片不透明度）
     // v4 = 提示音可选音色与音量（bull_tone / bear_tone / sound_volume）
     // v5 = 自选股可隐藏（WatchItem.hidden）
+    // v6 = 日K均线可配（charts.ma_periods）+ 悬浮窗资金流开关（show_fund_flow）
     //
     // 这是一道刻意会被绊倒的守卫：改版本号必须同时补一条 migrate 路径，
     // 所以此处每次上调都要连带确认 vN-1→vN 的迁移测试已存在。
     // （3→4 与 4→5 两次上调它都绊倒了我，每次都是随后才补上迁移测试 ——
-    //  这道守卫是有效的。）
-    assert_eq!(SCHEMA_VERSION, 5);
+    //  这道守卫是有效的。v5→v6 这次是先补了 migrate_v5_to_v6 才过的它。）
+    assert_eq!(SCHEMA_VERSION, 6);
 }
 
 // ---------- 2. v1 → v2 迁移：自选股必须一条不丢（标准 20）----------
@@ -275,10 +276,12 @@ fn corrupted_requires_backup_of_user_file() {
 }
 
 #[test]
-fn corrupted_message_mentions_bak_and_default_restore() {
+fn corrupted_message_mentions_corrupt_file_and_default_restore() {
     let r = migrate("{ broken");
     let msg = r.outcome.user_message().expect("损坏必须有用户可见提示");
-    assert!(msg.contains("config.json.bak"), "实际文案: {msg}");
+    // v0.3.0 起文案指向 .corrupt（损坏原文另存处）；
+    // 这个分支走到时意味着**备份也没救回来**，故必须说"恢复默认"
+    assert!(msg.contains("config.json.corrupt"), "实际文案: {msg}");
     assert!(msg.contains("默认"), "实际文案: {msg}");
 }
 
@@ -664,17 +667,17 @@ fn v4_migration_preserves_everything_else() {
 #[test]
 fn v4_migration_writes_back_current_version_without_backup() {
     let r = migrate(&v4_json());
-    assert_eq!(r.config.schema_version, 5);
+    assert_eq!(r.config.schema_version, SCHEMA_VERSION);
     assert!(!r.outcome.needs_backup(), "迁移不是损坏，不得生成 .bak");
     assert!(r.outcome.needs_rewrite(), "迁移结果须写回磁盘固化");
 }
 
 #[test]
-fn v1_migrates_all_the_way_to_v5_in_one_pass() {
-    // 整条链一次跑完：v1 → v5。既有各级效果都还在，且新字段已补。
+fn v1_migrates_all_the_way_to_v6_in_one_pass() {
+    // 整条链一次跑完：v1 → v6。既有各级效果都还在，且新字段已补。
     let r = migrate(&v1_json_with_five_items());
-    assert_eq!(r.config.schema_version, 5);
-    assert_eq!(r.config.watchlist.len(), 5, "跨四级迁移也不能丢自选股");
+    assert_eq!(r.config.schema_version, SCHEMA_VERSION);
+    assert_eq!(r.config.watchlist.len(), 5, "跨五级迁移也不能丢自选股");
     assert!(!r.config.alerts.enabled, "v1 用户不该被动开启提醒");
     assert_eq!(r.config.alerts.bull_tone, "chime");
     // v5 的新字段：全部可见
@@ -682,6 +685,9 @@ fn v1_migrates_all_the_way_to_v5_in_one_pass() {
         r.config.watchlist.iter().all(|i| !i.hidden),
         "从 v1 升上来的自选股必须全部可见"
     );
+    // v6 的新字段：均线默认 [5,20]（与 v0.2.x 观感一致）、资金流默认显示
+    assert_eq!(r.config.charts.ma_periods, vec![5, 20]);
+    assert!(r.config.appearance.show_fund_flow);
 }
 
 // ---------- base_price（提醒基准价）：加字段不需要迁移 ----------
@@ -707,6 +713,23 @@ fn v5_json_rule_without_base_price() -> String {
     .to_string()
 }
 
+/// 与 v5 版同构、只是版本号标 v6：供"加 Option 字段不升版本"的守卫测试用
+fn v6_json_rule_without_base_price() -> String {
+    serde_json::json!({
+        "schemaVersion": 6,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false}
+        ],
+        "alerts": {
+            "enabled": true,
+            "rules": {
+                "sh600519": {"up_percent": 3.0, "bull_price": 1500.0}
+            }
+        }
+    })
+    .to_string()
+}
+
 #[test]
 fn v5_rule_without_base_price_loads_as_none() {
     let r = migrate(&v5_json_rule_without_base_price());
@@ -724,10 +747,12 @@ fn v5_rule_without_base_price_keeps_existing_fields() {
 }
 
 #[test]
-fn v5_config_with_new_field_is_still_current_version() {
-    // 关键结论：v5 配置读进来仍是 Current，不触发迁移、不写回、不备份。
-    // 这一条挂了就说明 base_price 确实需要一次 v5→v6 迁移。
-    let r = migrate(&v5_json_rule_without_base_price());
+fn v6_config_with_new_field_is_still_current_version() {
+    // 关键结论：v6 配置（规则里缺 base_price）读进来仍是 Current，
+    // 不触发迁移、不写回、不备份。base_price 是 Option + serde default，
+    // 它当年没把 v5 抬到 v6，现在也不该把 v6 抬到 v7。
+    // （v5 的同名旧用例已随 v5→v6 真迁移而失效，语义搬到 v6 上继续守。）
+    let r = migrate(&v6_json_rule_without_base_price());
     assert_eq!(r.outcome, LoadOutcome::Current, "加 Option 字段不该触发迁移");
     assert_eq!(r.config.schema_version, SCHEMA_VERSION);
 }
@@ -1025,8 +1050,22 @@ fn explicit_collapsed_true_round_trips() {
 
 #[test]
 fn collapsed_field_does_not_bump_schema_version() {
-    // 加 Option 字段不需要迁移，所以版本号不该变（与 theme / refresh 同理）
-    let r = migrate(&v5_json_window_without_collapsed());
+    // 加 Option 字段不需要迁移，所以版本号不该变（与 theme / refresh 同理）。
+    // v6 语义守卫：v6 配置缺 collapsed 读进来仍是 Current。
+    let json = serde_json::json!({
+        "schemaVersion": 6,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false}
+        ],
+        "window": {
+            "x": 120,
+            "y": 240,
+            "always_on_top": false,
+            "locked": true
+        }
+    })
+    .to_string();
+    let r = migrate(&json);
     assert_eq!(r.outcome, LoadOutcome::Current, "加 Option 字段不该触发迁移");
     assert_eq!(r.config.schema_version, SCHEMA_VERSION);
     assert!(
@@ -1043,4 +1082,88 @@ fn default_window_config_is_ball() {
         cfg.window.is_collapsed(),
         "默认配置应为球态"
     );
+}
+
+// ---------- v5 → v6：均线可配 + 资金流开关（v0.3.0） ----------
+
+fn v5_json_full() -> String {
+    serde_json::json!({
+        "schemaVersion": 5,
+        "watchlist": [
+            {"tencent_code":"sh600519","em_secid":"1.600519","market":"ashare","is_index":false,"hidden":false},
+            {"tencent_code":"sz002466","em_secid":"0.002466","market":"ashare","is_index":false,"hidden":true}
+        ],
+        "appearance": { "scale": 1.2, "theme": "light" }
+    })
+    .to_string()
+}
+
+#[test]
+fn v5_migrates_to_v6_with_charts_default_and_fund_flow_on() {
+    let r = migrate(&v5_json_full());
+    assert_eq!(r.outcome, LoadOutcome::Migrated { from: 5 });
+    // v6 两个字段补默认：均线 [5,20]（老观感不变）、资金流默认显示
+    assert_eq!(r.config.charts.ma_periods, vec![5, 20]);
+    assert!(r.config.appearance.show_fund_flow);
+    // 既有字段一律保留
+    assert_eq!(r.config.watchlist.len(), 2);
+    assert!(r.config.watchlist[1].hidden, "v5 的 hidden 标记不能在迁移中丢失");
+    assert_eq!(r.config.appearance.scale, 1.2);
+    assert!(r.outcome.needs_rewrite(), "迁移结果须写回固化");
+}
+
+#[test]
+fn v6_with_custom_ma_periods_round_trips() {
+    let json = serde_json::json!({
+        "schemaVersion": 6,
+        "watchlist": [],
+        "charts": { "ma_periods": [5, 10, 20, 60] }
+    })
+    .to_string();
+    let r = migrate(&json);
+    assert_eq!(r.outcome, LoadOutcome::Current);
+    assert_eq!(r.config.charts.ma_periods, vec![5, 10, 20, 60]);
+}
+
+// ---------- ChartConfig::sanitize：手改配置文件必须被钳制 ----------
+
+use tickerglass_lib::config::schema::ChartConfig;
+
+#[test]
+fn ma_periods_sanitize_sorts_dedupes_and_filters() {
+    let mut c = ChartConfig {
+        ma_periods: vec![20, 5, 1, 5, 300, 10],
+    };
+    c.sanitize();
+    // 1（<MA_PERIOD_MIN）与 300（>MA_PERIOD_MAX）被滤掉，20/5 去重排序
+    assert_eq!(c.ma_periods, vec![5, 10, 20]);
+}
+
+#[test]
+fn ma_periods_sanitize_truncates_to_eight() {
+    let mut c = ChartConfig {
+        ma_periods: vec![3, 5, 7, 9, 11, 13, 15, 17, 19, 21],
+    };
+    c.sanitize();
+    assert_eq!(c.ma_periods.len(), 8);
+    assert_eq!(c.ma_periods.first(), Some(&3));
+}
+
+#[test]
+fn ma_periods_all_invalid_falls_back_to_default() {
+    let mut c = ChartConfig { ma_periods: vec![0, 1, 999] };
+    c.sanitize();
+    assert_eq!(c.ma_periods, vec![5, 20], "全滤光后回落默认，不能是空列表");
+}
+
+// ---------- RecoveredFromBackup（v0.3.0 备份机制的新状态） ----------
+
+#[test]
+fn recovered_from_backup_flags() {
+    let o = LoadOutcome::RecoveredFromBackup { reason: "测试".into() };
+    assert!(o.needs_backup(), "备份恢复路径也要保留损坏原文（.corrupt）");
+    assert!(o.needs_rewrite(), "恢复结果须写回主文件自愈");
+    let msg = o.user_message().expect("必须有用户提示");
+    assert!(msg.contains("备份"), "实际文案: {msg}");
+    assert!(msg.contains("保留"), "必须说清数据没丢，实际文案: {msg}");
 }

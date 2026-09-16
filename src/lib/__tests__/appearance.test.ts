@@ -21,6 +21,7 @@ function cfg(over: Partial<AppearanceConfig> = {}): AppearanceConfig {
     opacity_text: 1,
     opacity_curve: 1,
     theme: null,
+    show_fund_flow: true,
     ...over,
   };
 }

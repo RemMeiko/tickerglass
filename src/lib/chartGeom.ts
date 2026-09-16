@@ -20,7 +20,8 @@ export interface YScale {
 
 /**
  * Y 轴映射。极值只取已落栅格的点（盘后重复点已被后端丢弃）。
- * 昨收也纳入范围，保证基准线始终可见。
+ * 昨收与均价也纳入范围，保证基准线/均价线始终可见 ——
+ * 均价线（v0.3.0）若不进范围，价格窄幅震荡时它会画出画布外。
  * 上下留 padding，避免曲线贴边。
  */
 export function makeYScale(
@@ -33,13 +34,17 @@ export function makeYScale(
 
   let min = points[0].price;
   let max = points[0].price;
+  const consider = (v: number | null) => {
+    if (v == null || !Number.isFinite(v)) return;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  };
   for (const p of points) {
-    if (p.price < min) min = p.price;
-    if (p.price > max) max = p.price;
+    consider(p.price);
+    consider(p.avg);
   }
   if (prevClose !== null && Number.isFinite(prevClose) && prevClose > 0) {
-    min = Math.min(min, prevClose);
-    max = Math.max(max, prevClose);
+    consider(prevClose);
   }
 
   // 全平（所有点同价）时给一个极小区间，避免除零把曲线画到画布外

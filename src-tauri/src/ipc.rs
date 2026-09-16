@@ -311,6 +311,25 @@ pub fn update_refresh(
     next
 }
 
+/// 更新日K 均线周期列表（v0.3.0 需求 4）。
+///
+/// 传什么周期由图表窗口的均线编辑器决定；这里负责钳制（升序去重、
+/// 区间 2~250、≤8 条）—— IPC 是可被绕过的入口，不能信调用方。
+/// 下次 `fetch_chart("dayk")` 自然按新配置算均线，无需通知图表窗。
+#[tauri::command]
+pub fn update_ma_periods(
+    periods: Vec<u32>,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> AppConfig {
+    let state = state.inner().clone();
+    let mut next = state.config();
+    next.charts.ma_periods = periods;
+    next.charts.sanitize();
+    commit(&app, &state, next.clone(), false);
+    next
+}
+
 /// 添加自选股。上限与去重判定在纯函数 `watchlist::add` 里。
 ///
 /// # `market` / `is_index` 一律服务端重算，不信前端传的值
@@ -582,12 +601,19 @@ pub enum ChartPayload {
         days: Vec<crate::parse::tencent_5day::DaySeries>,
         grid_len: usize,
     },
-    /// 日K：蜡烛 + 两条均线（均线在后端算，前端只画）
+    /// 日K：蜡烛 + 按用户配置的均线组（均线在后端算，前端只画）。
+    /// v0.3.0 起周期可配置（`charts.ma_periods`），不再是硬编码的 MA5/20。
     DailyK {
         bars: Vec<crate::parse::em_kline::KlineBar>,
-        ma5: Vec<Option<f64>>,
-        ma20: Vec<Option<f64>>,
+        mas: Vec<MaLine>,
     },
+}
+
+/// 一条均线：周期 + 逐根值（前 period-1 根为 `None`）。
+#[derive(Debug, Clone, Serialize)]
+pub struct MaLine {
+    pub period: u32,
+    pub values: Vec<Option<f64>>,
 }
 
 /// 大图窗拉数据。`period` 取 `"intraday"` / `"5day"` / `"dayk"`。
@@ -701,9 +727,17 @@ async fn fetch_chart_inner(
             let text = crate::parse::gbk::decode_gbk(&bytes);
             let bars = crate::parse::tencent_kline::parse_tencent_kline(&text, &req_code)
                 .map_err(|e| format!("日K 解析失败: {e:?}"))?;
-            let ma5 = em_kline::moving_average(&bars, 5);
-            let ma20 = em_kline::moving_average(&bars, 20);
-            Ok(ChartPayload::DailyK { bars, ma5, ma20 })
+            // 均线周期读用户配置（charts.ma_periods，进 state 前已 sanitize：
+            // 升序去重、条数≤8），旧配置缺字段时是默认 [5, 20]，观感与 v0.2.x 一致
+            let periods = state.config().charts.ma_periods.clone();
+            let mas = periods
+                .iter()
+                .map(|p| MaLine {
+                    period: *p,
+                    values: em_kline::moving_average(&bars, *p as usize),
+                })
+                .collect();
+            Ok(ChartPayload::DailyK { bars, mas })
         }
         other => Err(format!("未知周期: {other}")),
     }
@@ -972,7 +1006,10 @@ const MARKET_SECIDS: [(&str, &str); 3] = [
 ///
 /// 复用 `parse::tencent_quote::parse_batch`（已有 49 项测试覆盖，含 GBK 解码），
 /// 不另写解析器。
-const INDEX_TENCENT_CODES: [&str; 3] = ["sh000001", "sz399001", "sz399006"];
+/// 大盘面板的指数清单（**腾讯**代码）。v0.3.0 需求 5：补科创50 ——
+/// 此前只有上证/深成/创业板三条，缺了 2023 年后看科技盘最常用的那条；
+/// 腾讯批量接口一次带四条，不增加请求数。
+const INDEX_TENCENT_CODES: [&str; 4] = ["sh000001", "sz399001", "sz399006", "sh000688"];
 
 /// 大盘数据的**最后一次成功值**缓存（按 secid）。
 ///
@@ -1075,8 +1112,9 @@ pub async fn fetch_market_overview_inner() -> Result<MarketOverview, String> {
                         price,
                         change_percent: q.change.percent.unwrap_or(0.0),
                         change_amount: q.change.amount.unwrap_or(0.0),
-                        // Quote 不含成交额；IndexCards 遇 None 会跳过这一行而不显示 0
-                        amount: None,
+                        // 成交额来自报价报文 [38]（万元→元）。v0.3.0 需求 5：
+                        // 此前恒为 None，指数卡一直缺"成交"这一行
+                        amount: q.amount,
                     });
                 }
             }
@@ -1238,4 +1276,77 @@ pub fn set_alert_rule(
     state.clear_arm_states_for(&code);
     commit(&app, &state, next.clone(), false);
     Ok(next)
+}
+
+// ───────────────────────── 悬停资金流提示窗（v0.3.0） ─────────────────────────
+
+/// flowtip 当前内容。**pull 模型**：flowtip 页面挂载时 invoke
+/// `flow_tip_current` 拉一次，防"窗口刚建好、页面还没挂上 listen、
+/// 第一个事件已发完"的首帧空白（大图窗换股栽过同一个坑）。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct FlowTipPayload {
+    pub main_net: f64,
+    pub retail_net: f64,
+    pub market: crate::domain::market::Market,
+}
+
+static FLOW_TIP: std::sync::Mutex<Option<FlowTipPayload>> = std::sync::Mutex::new(None);
+
+/// 悬停某行 → 前端算好该行右缘的**物理屏幕坐标**后调用。
+/// 数据从快照取（不信前端传的数值），找不到该行/无资金流时如实 Err
+/// —— 提示窗不显示比显示错误数字好。
+///
+/// **必须 async**：首次要走 `build()`，同步命令 + 主线程 = 死锁
+/// （见 open_chart_window 的病历）。
+#[tauri::command]
+pub async fn show_flow_tip(
+    x: i32,
+    y: i32,
+    code: String,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let payload = {
+        let snap = state.get();
+        let row = snap
+            .rows
+            .iter()
+            .find(|r| r.code.eq_ignore_ascii_case(&code))
+            .ok_or_else(|| format!("{code} 不在快照中"))?;
+        let flow = row
+            .fund_flow
+            .ok_or_else(|| format!("{code} 暂无资金流数据"))?;
+        FlowTipPayload {
+            main_net: flow.main_net,
+            retail_net: flow.retail_net,
+            market: row.market,
+        }
+    };
+
+    {
+        let mut g = FLOW_TIP.lock().unwrap_or_else(|p| p.into_inner());
+        *g = Some(payload);
+    }
+    window::place_flow_tip(&app, x, y)?;
+    // emit 在 show 之后：内容与可见性同一帧到达（页面还有 pull 兜底）
+    use tauri::Emitter;
+    app.emit_to(window::FLOW_TIP_LABEL, "flow-tip", payload)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 鼠标离开该行 → 隐藏提示窗并清掉载荷。
+#[tauri::command]
+pub fn hide_flow_tip(app: AppHandle) -> Result<(), String> {
+    {
+        let mut g = FLOW_TIP.lock().unwrap_or_else(|p| p.into_inner());
+        *g = None;
+    }
+    window::hide_flow_tip(&app)
+}
+
+/// flowtip 页面挂载时拉当前载荷（pull 兜底，见 FLOW_TIP 注释）。
+#[tauri::command]
+pub fn flow_tip_current() -> Option<FlowTipPayload> {
+    *FLOW_TIP.lock().unwrap_or_else(|p| p.into_inner())
 }

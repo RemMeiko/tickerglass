@@ -66,6 +66,7 @@ pub fn initial_snapshot(items: &[WatchItem]) -> Snapshot {
                 minute: None,
                 state: DataState::Pending,
                 minute_available: false,
+                fund_flow: None,
             })
             .collect(),
         updated_at: String::new(),
@@ -116,6 +117,7 @@ pub fn rebuild_snapshot(state: &Arc<AppState>, items: &[WatchItem]) {
                     minute: None,
                     state: DataState::Pending,
                     minute_available: false,
+                    fund_flow: None,
                 },
             }
         })
@@ -196,6 +198,8 @@ pub fn spawn(app: AppHandle) {
     {
         let app = app.clone();
         let state = state.clone();
+        // 资金流链路还要用 fetcher，这里必须 clone 而不是 move（最后一个使用者）
+        let fetcher = fetcher.clone();
         tauri::async_runtime::spawn(async move {
             // 同报价链路：记下当前间隔用于比对，改了才重建（见循环内说明）
             let mut cur_secs = state.config().refresh.minute_secs;
@@ -241,6 +245,91 @@ pub fn spawn(app: AppHandle) {
             }
         });
     }
+
+    // 资金流轮询（v0.3.0 需求 6）：整批自选股一个 ulist.np 请求。
+    //
+    // 走 **push2delay**（见 net::fetch_em_fund_flow 的选型说明）：独立限流域，
+    // 与 push2 大盘面板互不影响，60s 一轮即可（资金流是分钟级累计量）。
+    // 首轮延迟 10s：错开启动时的报价/分时首屏高峰。
+    {
+        let app = app.clone();
+        let state = state.clone();
+        let fetcher = fetcher.clone();
+        tauri::async_runtime::spawn(async move {
+            // 首轮延迟 10s：错开启动时的报价/分时首屏高峰
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let mut tick = tokio::time::interval(Duration::from_secs(FLOW_SECS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // 批次轮转游标：>40 只有 secid 时分多批，每轮只发一批
+            let mut batch_cursor: usize = 0;
+            loop {
+                tick.tick().await;
+                let items = state.config().watchlist;
+                let secids: Vec<String> = items
+                    .iter()
+                    .filter_map(|it| it.em_secid.clone())
+                    .collect();
+                if secids.is_empty() {
+                    continue;
+                }
+                let batches: Vec<Vec<String>> =
+                    secids.chunks(FLOW_BATCH_SIZE).map(|c| c.to_vec()).collect();
+                let idx = batch_cursor % batches.len();
+                batch_cursor = batch_cursor.wrapping_add(1);
+                let refs: Vec<&str> = batches[idx].iter().map(|s| s.as_str()).collect();
+                if refresh_fund_flows(&fetcher, &state, &items, &refs).await.is_ok() {
+                    emit_snapshot(&app, &state);
+                } else {
+                    // 限流/网络失败都是预期内的常态：保留旧值，下一轮再来。
+                    // 不打 warn 刷屏 —— debug 足够
+                    log::debug!("[资金流] 第 {}/{} 批本轮未更新", idx + 1, batches.len());
+                }
+            }
+        });
+    }
+}
+
+/// 资金流轮询间隔（秒）。push2delay 实测可承 ~30s 一次（美股分时链路在用），
+/// 60s 对"看主力散户哪边在流入"绰绰有余。
+const FLOW_SECS: u64 = 60;
+/// 一批最多带多少 secid。与报价批 40 对齐（ulist.np 未实测更大的批量，
+/// 超上限的风险由"失败即跳过、保留旧值"兜底）。
+const FLOW_BATCH_SIZE: usize = 40;
+
+/// 拉一批 secid 的当日资金流并写进快照。整批一个请求；失败时保留旧值。
+///
+/// 返回 `Err` 只用于调用方记日志；行级匹配不上的（响应缺行，如美股无数据）
+/// 保持 `fund_flow: None`，不清空已有值 —— 与 quote/minute 的"失败不清空"同一纪律。
+async fn refresh_fund_flows(
+    fetcher: &Fetcher,
+    state: &Arc<AppState>,
+    items: &[WatchItem],
+    secids: &[&str],
+) -> Result<(), String> {
+    let bytes = fetcher.fetch_em_fund_flow(secids).await.map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let flows = crate::parse::em_fundflow::parse_fund_flow(&text).map_err(|e| e.to_string())?;
+    let by_secid: std::collections::HashMap<&str, _> =
+        flows.iter().map(|(s, f)| (s.as_str(), f)).collect();
+
+    let mut snap = state.get();
+    for item in items {
+        let Some(secid) = item.em_secid.as_deref() else {
+            continue;
+        };
+        let Some(flow) = by_secid.get(secid) else {
+            continue;
+        };
+        if let Some(row) = snap
+            .rows
+            .iter_mut()
+            .find(|r| r.code.eq_ignore_ascii_case(&item.tencent_code))
+        {
+            row.fund_flow = Some(**flow);
+        }
+    }
+    state.set(snap);
+    Ok(())
 }
 
 fn emit_snapshot(app: &AppHandle, state: &Arc<AppState>) {

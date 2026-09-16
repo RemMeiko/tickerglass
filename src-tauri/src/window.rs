@@ -652,3 +652,89 @@ pub fn resize_main(app: &AppHandle, w: f64, h: f64) -> Result<(), String> {
     clamp_window_position(&win);
     Ok(())
 }
+
+// ───────────────────────── 悬停资金流提示窗（v0.3.0） ─────────────────────────
+
+pub const FLOW_TIP_LABEL: &str = "flowtip";
+/// 提示窗逻辑尺寸（px）。内容是两个 chip，实测够放
+/// 「主力 -12.34亿 · 散户 +5678万」。
+const FLOW_TIP_W: f64 = 190.0;
+const FLOW_TIP_H: f64 = 34.0;
+
+/// 确保 flowtip 窗口存在（**只建不显**）。已存在则原样返回。
+///
+/// 与 popup 同一套注意点：无边框必须 `.shadow(false)`（系统沿矩形画阴影，
+/// 圆角外会透出方形阴影）；`focused(false)` 不抢焦点；先建后显防"默认位置
+/// 闪一下"。**额外一条本窗特有：`set_ignore_cursor_events(true)`** ——
+/// 它贴着主窗右缘显示，若不穿透鼠标，掠过它去点别处会被这层看不见的
+/// 窗口挡住。
+///
+/// # 调用方必须走 async 命令
+///
+/// 首次要走 `build()`，同步命令 + 主线程 = 死锁（见 ipc::open_chart_window
+/// 的完整病历）。
+pub fn ensure_flow_tip(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(win) = app.get_webview_window(FLOW_TIP_LABEL) {
+        return Ok(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        FLOW_TIP_LABEL,
+        tauri::WebviewUrl::App("flowtip.html".into()),
+    )
+    .title("TickerGlass")
+    .inner_size(FLOW_TIP_W, FLOW_TIP_H)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    // 鼠标穿透：它永远不该成为鼠标事件的落点
+    win.set_ignore_cursor_events(true)
+        .map_err(|e| e.to_string())?;
+    Ok(win)
+}
+
+/// 把 flowtip 摆到主窗某行的右缘外侧（物理坐标，由前端按行矩形算好），
+/// 然后显示。**钳制在显示器工作区内** —— 悬浮窗常贴屏幕右缘放着，
+/// 不钳制的话提示会整体跑到屏幕外。
+pub fn place_flow_tip(app: &AppHandle, x: i32, y: i32) -> Result<(), String> {
+    let tip = ensure_flow_tip(app)?;
+    let mut x = x;
+    let mut y = y;
+
+    // 主窗所在显示器的工作区做边界（拿不到显示器就不钳制，宁可冒一点
+    // 越界也别因为钳制逻辑把提示弄丢）
+    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
+        if let Ok(Some(mon)) = main.current_monitor() {
+            let m_pos = mon.position();
+            let m_size = mon.size();
+            let (tw, th) = tip
+                .outer_size()
+                .map(|s| (s.width as i32, s.height as i32))
+                .unwrap_or((FLOW_TIP_W as i32, FLOW_TIP_H as i32));
+            let max_x = m_pos.x + m_size.width as i32 - tw;
+            let max_y = m_pos.y + m_size.height as i32 - th;
+            x = x.min(max_x).max(m_pos.x);
+            y = y.min(max_y).max(m_pos.y);
+        }
+    }
+
+    tip.set_position(tauri::PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    tip.show().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 隐藏 flowtip（窗口保留复用，销毁重建会有闪白）。
+pub fn hide_flow_tip(app: &AppHandle) -> Result<(), String> {
+    if let Some(tip) = app.get_webview_window(FLOW_TIP_LABEL) {
+        tip.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}

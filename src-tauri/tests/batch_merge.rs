@@ -26,6 +26,7 @@ fn ok_quote(code: &str) -> QuoteParseOutcome {
         price_decimals: Some(2),
         raw_timestamp: String::new(),
         quote_time: None,
+        amount: None,
     })
 }
 

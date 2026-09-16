@@ -166,6 +166,44 @@ pub struct Fetcher {
     client: reqwest::Client,
 }
 
+// ───────────── push2 全局闸门（v0.3.0 新增） ─────────────
+
+/// `push2.eastmoney.com` 上一次**实际发出**请求的时刻。
+///
+/// # 为什么必须有这个闸门（2026-09-16 实测复盘）
+///
+/// v0.3.0 起有两条链路要打 push2：大盘面板（家数/资金流轮转）与
+/// ~~个股资金流~~（已改走 `push2delay`，不占本闸门）。当天实测：
+/// 间隔 ~90s 的两次请求都成功，但中间夹的第三次（紧跟在上一次后 ~90s 内）
+/// 返回**空响应体**，随后升级为 TLS 掐断 —— 惩罚是 host 级的且会被后续
+/// 请求延长。所以所有 push2 请求（不分路径）共用这把闸：距上次发出不足
+/// [`PUSH2_MIN_GAP`] 就**拒绝发送**（不打网络，不刷新计时器），
+/// 调用方按普通失败处理（大盘面板用缓存）。拒绝不消耗额度。
+static PUSH2_GATE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// push2 相邻两次请求的最小间隔。90s 实测安全、60s 实测会被掐，
+/// 取 65s 偏保守值 —— 宁可慢一点，也不把整个 host 打进 3 分钟惩罚。
+const PUSH2_MIN_GAP: Duration = Duration::from_secs(65);
+
+/// 尝试占用 push2 额度。`Ok` = 本轮可以发请求（已记账）；
+/// `Err` = 间隔未到，调用方跳过本轮。
+pub fn push2_acquire() -> Result<(), NetError> {
+    let mut last = PUSH2_GATE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let now = std::time::Instant::now();
+    if let Some(t) = *last {
+        if now.duration_since(t) < PUSH2_MIN_GAP {
+            return Err(NetError::Http(format!(
+                "push2 限流闸门：距上次请求不足 {}s，本轮跳过",
+                PUSH2_MIN_GAP.as_secs()
+            )));
+        }
+    }
+    *last = Some(now);
+    Ok(())
+}
+
 impl Fetcher {
     pub fn new() -> Result<Self, NetError> {
         let client = reqwest::Client::builder()
@@ -297,6 +335,7 @@ impl Fetcher {
     /// 故调用方必须把"空响应"当成一种**明确的限流状态**，
     /// 绝不能当成"家数为 0"（那会在界面上显示彻底虚假的数据）。
     pub async fn fetch_em_market_stats(&self, secid: &str) -> Result<Vec<u8>, NetError> {
+        push2_acquire()?;
         // 一次请求同时取家数与五档资金流向，省一半请求（限流约束下很重要）
         let fields = "f57,f58,f43,f170,f113,f114,f115,\
                       f135,f136,f137,f138,f139,f140,\
@@ -323,6 +362,7 @@ impl Fetcher {
     /// 若解析不出家数就退回逐市场的 `stock/get`。
     /// 这样无论这个未验证前提成立与否都不会比现状更差。
     pub async fn fetch_em_markets_batch(&self, secids: &[&str]) -> Result<Vec<u8>, NetError> {
+        push2_acquire()?;
         // f12/f14 是代码与名称，其余同 fetch_em_market_stats
         let fields = "f12,f14,f113,f114,f115,\
                       f135,f136,f137,f138,f139,f140,\
@@ -336,10 +376,35 @@ impl Fetcher {
 
     /// 大盘面板：三大指数快照（一个请求）。
     pub async fn fetch_em_indices(&self) -> Result<Vec<u8>, NetError> {
+        push2_acquire()?;
         let url = "https://push2.eastmoney.com/api/qt/ulist.np/get\
                    ?secids=1.000001,0.399001,0.399006\
                    &fields=f1,f2,f3,f4,f6,f12,f14";
         self.get_bytes(url).await
+    }
+
+    /// 个股当日资金流（v0.3.0 需求 6）：**一个请求**带整批 secid。
+    ///
+    /// 字段：f12 裸码 / f13 市场号（拼回 secid）/ f14 名称 /
+    /// f62 主力净 / f66 超大净 / f72 大单净 / f78 中单净 / f84 小单净 / f124 时间戳。
+    /// 2026-09-16 实测：A 股/港股有值，美股字段为 `-`（解析层跳过 → 前端不显示）。
+    ///
+    /// # 为什么是 `push2delay` 而不是 `push2`（2026-09-16 下午实测定案）
+    ///
+    /// `push2` 当天对本机进入 TLS 掐断惩罚（生产路径冒烟复现：
+    /// `peer closed connection without sending TLS close_notify`），
+    /// 且探测会延长惩罚。而 `push2delay` 是**独立限流域** —— 本项目美股分时
+    /// 已在它上面 ~30s 一次稳定轮询数月。资金流实测（含恒等式）在 delay 上
+    /// 与 push2 完全一致，只是延迟 15 分钟 —— 对"日内累计主力/散户流向"无感。
+    /// 故资金流固定走 delay，不占 push2 闸门额度，也不用担心互杀。
+    pub async fn fetch_em_fund_flow(&self, secids: &[&str]) -> Result<Vec<u8>, NetError> {
+        let fields = "f12,f13,f14,f62,f66,f72,f78,f84,f124";
+        let url = format!(
+            "https://push2delay.eastmoney.com/api/qt/ulist.np/get?secids={}&fields={fields}\
+             &ut=b2884a393a59ad64002292a3e90d46a5",
+            secids.join(",")
+        );
+        self.get_bytes(&url).await
     }
 
     /// 5 日分时（东财，**美股专用**）。腾讯不供美股 5 日，见 [`Self::fetch_tencent_5day`]。

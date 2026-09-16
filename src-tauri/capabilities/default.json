@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "StockPet Plus 悬浮窗、设置窗与大图窗的最小权限集",
-  "windows": ["main", "settings", "chart", "market", "popup"],
+  "windows": ["main", "settings", "chart", "market", "popup", "flowtip"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

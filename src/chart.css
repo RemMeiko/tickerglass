@@ -225,6 +225,67 @@
   color: var(--c-accent-chart);
 }
 
+/* ── 均线编辑器（v0.3.0 需求 4）。浮在图区左上、读数条下方，
+   绝对定位不占布局 —— 占了会与 ResizeObserver 互相挤压（同 .candle-readout） */
+.ma-editor {
+  position: absolute;
+  top: 26px;
+  left: 58px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.ma-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(var(--c-black-rgb), 0.38);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.ma-chip .ma-x {
+  font-size: 10px;
+  opacity: 0.55;
+}
+
+.ma-chip:hover .ma-x {
+  opacity: 1;
+}
+
+.ma-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ma-add input {
+  width: 56px;
+  padding: 2px 7px;
+  font-size: 11px;
+  border-radius: 999px;
+  background: rgba(var(--c-black-rgb), 0.38);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14);
+  color: rgba(var(--c-text-rgb), 0.9);
+}
+
+.ma-add button {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 999px;
+  background: rgba(var(--c-black-rgb), 0.38);
+  border: 0.5px solid rgba(var(--c-white-rgb), 0.14);
+  color: rgba(var(--c-text-rgb), 0.75);
+  cursor: pointer;
+}
+
 .chart-msg {
   margin: auto;
   font-size: 13px;

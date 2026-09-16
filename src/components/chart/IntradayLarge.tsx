@@ -7,6 +7,9 @@ export interface LargePoint {
   /** 横轴位置（0..slots-1）。当日分时由后端 grid_index 提供，前端不推算时段 */
   slot: number;
   price: number;
+  /** 真实均价（累计额/累计量，后端算好）。有就用它画均价线；
+      没有才退回"价格累积均值"近似（5 日分时的腾讯通道无量额） */
+  avg?: number;
   volume?: number;
   /** 该点之前是否断线（午休）。当日分时由后端 break_before 标记 */
   breakBefore?: boolean;
@@ -111,6 +114,11 @@ export default function IntradayLarge({
       for (const p of s.points) {
         const dev = Math.abs(p.price - b) / (b || 1);
         if (dev > maxDev) maxDev = dev;
+        // 均价线也要纳入范围，否则窄幅震荡日它会画出框外（v0.3.0）
+        if (p.avg != null) {
+          const adev = Math.abs(p.avg - b) / (b || 1);
+          if (adev > maxDev) maxDev = adev;
+        }
       }
     }
     if (maxDev <= 0) maxDev = 0.01;
@@ -231,7 +239,11 @@ export default function IntradayLarge({
       });
       ctx.stroke();
 
-      // 均价线（累计成交额/累计量的近似：用价格累积均值，无量时退化为算术均值）
+      // 均价线。v0.3.0 起优先用后端算好的真实均价（累计额/累计量）；
+      // 段内一个真实均价都没有（如 5 日分时无量额）才退化为
+      // "价格×量累积均值 / 算术均值"的近似。两种来源不能混用 ——
+      // 真实均价与近似值之间存在系统性偏差，混画会出现均价线台阶
+      const hasRealAvg = seg.points.some((p) => p.avg != null);
       ctx.strokeStyle = "rgba(232,180,76,0.85)";
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 3]);
@@ -241,11 +253,20 @@ export default function IntradayLarge({
       let sumP = 0;
       started = false;
       seg.points.forEach((p, i) => {
-        const v = p.volume ?? 0;
-        sumPV += p.price * v;
-        sumV += v;
-        sumP += p.price;
-        const avg = sumV > 0 ? sumPV / sumV : sumP / (i + 1);
+        let avg: number | null = null;
+        if (hasRealAvg) {
+          avg = p.avg ?? null;
+        } else {
+          const v = p.volume ?? 0;
+          sumPV += p.price * v;
+          sumV += v;
+          sumP += p.price;
+          avg = sumV > 0 ? sumPV / sumV : sumP / (i + 1);
+        }
+        if (avg == null) {
+          started = false;
+          return;
+        }
         const x = xOf(si, p.slot);
         const y = yOf(avg, segBase);
         if (!started) {
@@ -515,6 +536,9 @@ export default function IntradayLarge({
           <>
             {hp.label && <span className="ro-date">{hp.label}</span>}
             <span>价 {hp.price.toFixed(2)}</span>
+            {hp.avg != null && (
+              <span style={{ color: "#e8b64c" }}>均 {hp.avg.toFixed(2)}</span>
+            )}
             {hPct != null && (
               <span style={{ color: changeColor(hPct, market, theme) }}>
                 {hPct >= 0 ? "+" : ""}

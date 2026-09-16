@@ -179,3 +179,66 @@ fn hk_after_close_points_are_dropped() {
     assert_eq!(s.points.last().map(|p| p.hhmm), Some(1559));
     assert_eq!(s.points.len(), 331, "332 原始点丢掉 1 个盘后点 1608");
 }
+
+// ---------- 均价线（v0.3.0 需求 1）：量纲按市场，指数不算 ----------
+
+/// 造一份最小分时报文：只有 data 数组（qt 可缺，昨取 None 不影响均价测试）
+fn minute_json(code: &str, points: &[&str]) -> String {
+    let items: Vec<String> = points.iter().map(|p| format!("\"{p}\"")).collect();
+    format!(
+        r#"{{"code":0,"data":{{"{code}":{{"data":{{"data":[{}]}}}}}}}}"#,
+        items.join(",")
+    )
+}
+
+#[test]
+fn ashare_avg_divides_amount_by_volume_times_100() {
+    // 茅台首点实测形态："0930 1273.93 74 9427082.00"
+    // 74手=7400股 × 1273.93 = 9,427,082 元，均价必须按 手×100 折股
+    let json = minute_json(
+        "sh600519",
+        &["0930 1273.93 74 9427082.00", "0931 1271.90 883 112288395.00"],
+    );
+    let s = parse_minute(&json, "sh600519").unwrap();
+    let p0 = s.points.first().unwrap();
+    assert!((p0.avg.unwrap() - 1273.93).abs() < 0.01, "首点均价≈首价，实际 {:?}", p0.avg);
+    // 第二点：112288395 / (883×100) = 1271.68（介于两价之间的累计均价）
+    let p1 = s.points.get(1).unwrap();
+    assert!((p1.avg.unwrap() - 1271.6693).abs() < 0.01, "112288395/88300，实际 {:?}", p1.avg);
+}
+
+#[test]
+fn hk_avg_divides_amount_by_shares() {
+    // 腾讯控股首点实测："0930 438.800 935777 411306252.060"
+    // 港股量纲是**股**（935777 股，不是手），均价 = 额/量 不再乘 100
+    let json = minute_json(
+        "hk00700",
+        &["0930 438.800 935777 411306252.060"],
+    );
+    let s = parse_minute(&json, "hk00700").unwrap();
+    let p0 = s.points.first().unwrap();
+    assert!((p0.avg.unwrap() - 439.5345).abs() < 0.01, "411306252.06/935777，实际 {:?}", p0.avg);
+}
+
+#[test]
+fn index_avg_is_none_because_scale_mismatches() {
+    // 上证指数首点实测："0930 3861.75 3603417 5102370437.20"
+    // 额/量=1415.88 ≠ 指数点位 3861 —— "平均股价"与指数不同量纲，
+    // 画上去会压垮 Y 轴，必须 None（不臆造）
+    let json = minute_json(
+        "sh000001",
+        &["0930 3861.75 3603417 5102370437.20"],
+    );
+    let s = parse_minute(&json, "sh000001").unwrap();
+    assert!(s.points.first().unwrap().avg.is_none(), "指数不算均价");
+}
+
+#[test]
+fn missing_volume_or_amount_leaves_avg_none() {
+    // 只有两段的点（价格在、量额缺）：价格线照画、均价留空
+    let json = minute_json("sh600519", &["0930 1273.93", "0931 1271.90 883 112288395.00"]);
+    let s = parse_minute(&json, "sh600519").unwrap();
+    assert_eq!(s.points.len(), 2, "缺量额不是丢点的理由");
+    assert!(s.points[0].avg.is_none());
+    assert!(s.points[1].avg.is_some());
+}

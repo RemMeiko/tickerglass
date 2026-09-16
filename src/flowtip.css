@@ -1,0 +1,42 @@
+/* 悬停资金流提示窗（独立小窗，透明背景 + 紧凑卡片）。
+   观感与悬浮窗的 mc-readout 读数框同族：深底、细边、圆角。 */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  user-select: none;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flow-tip {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: 8px;
+  background: rgba(22, 22, 22, 0.95);
+  border: 0.5px solid rgba(255, 255, 255, 0.16);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ft-chip {
+  font-weight: 600;
+}
+
+.ft-sep {
+  color: rgba(255, 255, 255, 0.25);
+}

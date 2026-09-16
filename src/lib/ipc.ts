@@ -159,6 +159,19 @@ export async function updateRefresh(
   return invoke<AppConfig>("update_refresh", { refresh });
 }
 
+/**
+ * 更新日K 均线周期列表（v0.3.0 需求 4）。
+ *
+ * 返回落盘后的完整配置 —— 后端 sanitize 会升序去重并钳制条数/区间，
+ * 图表窗要用返回值（而不是自己发的数组）刷新图例，否则配置被钳过时
+ * 图例与实际画的线会不一致。
+ */
+export async function updateMaPeriods(
+  periods: number[]
+): Promise<AppConfig> {
+  return invoke<AppConfig>("update_ma_periods", { periods });
+}
+
 // ---------- 自定义提示音 ----------
 
 /**

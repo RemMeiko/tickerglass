@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 /// - 2 → 3：提醒体系（AlertConfig）
 /// - 3 → 4：提示音可选音色与音量（`bull_tone`/`bear_tone`/`sound_volume`）
 /// - 4 → 5：自选股可隐藏（`WatchItem.hidden`）
-pub const SCHEMA_VERSION: u32 = 5;
+/// - 5 → 6：日K 均线可配置（`charts.ma_periods`）+ 悬浮窗资金流显示开关
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// 缩放下限/上限（spec 标准 10：65% → 160%）。
 pub const SCALE_MIN: f64 = 0.65;
@@ -48,6 +49,52 @@ pub struct AppConfig {
     /// 刷新间隔（2026-08-31 新增）。缺字段时补默认，行为与硬编码时期一致
     #[serde(default)]
     pub refresh: RefreshConfig,
+    /// 图表设置（v6 新增）。日K 均线周期可由用户增删
+    #[serde(default)]
+    pub charts: ChartConfig,
+}
+
+/// 图表设置。
+///
+/// # 为什么 MA 周期放配置而不是图表窗口的本地 state
+///
+/// 用户调好的均线组合是**偏好**，换窗口/重启都该跟着走；
+/// 且 `fetch_chart` 在后端算均线（前端只画），周期必须随请求传到后端 ——
+/// 放配置是两条约束的自然交点。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChartConfig {
+    /// 日K 大图要画的均线周期列表（升序去重）。默认 MA5 + MA20（v0.2.x 的既有观感）。
+    pub ma_periods: Vec<u32>,
+}
+
+/// MA 周期条数上限。画布宽度有限（120 根 K 线 + 左侧刻度 52px），
+/// 8 条以上会糊成色带，谁也认不出哪条是哪条。
+pub const MA_PERIODS_MAX: usize = 8;
+/// 单个周期允许区间。MA1 退化成价格线本身；MA500 在 120 根日K 里永远画不出来。
+pub const MA_PERIOD_MIN: u32 = 2;
+pub const MA_PERIOD_MAX: u32 = 250;
+
+impl Default for ChartConfig {
+    fn default() -> Self {
+        ChartConfig {
+            ma_periods: vec![5, 20],
+        }
+    }
+}
+
+impl ChartConfig {
+    /// 钳制：过滤区间外的值、去重、升序、截断到条数上限。
+    /// 配置文件用户可手改，进 state 前必须合法；全被过滤掉时回落默认。
+    pub fn sanitize(&mut self) {
+        self.ma_periods.retain(|p| (MA_PERIOD_MIN..=MA_PERIOD_MAX).contains(p));
+        self.ma_periods.sort_unstable();
+        self.ma_periods.dedup();
+        self.ma_periods.truncate(MA_PERIODS_MAX);
+        if self.ma_periods.is_empty() {
+            *self = ChartConfig::default();
+        }
+    }
 }
 
 /// 数据刷新间隔配置。
@@ -112,6 +159,7 @@ impl Default for AppConfig {
             window: WindowConfig::default(),
             alerts: AlertConfig::default(),
             refresh: RefreshConfig::default(),
+            charts: ChartConfig::default(),
         }
     }
 }
@@ -280,6 +328,20 @@ pub struct AppearanceConfig {
     ///
     /// 只作用于三个普通窗口与中心弹窗；悬浮窗是透明窗口不做主题。
     pub theme: Option<Theme>,
+    /// 悬浮窗行内是否显示主力/散户资金流（v0.3.0 需求 6）。
+    ///
+    /// **默认开**：这个功能就是用户点名要的。做成开关是因为行高有限，
+    /// 看盘老手若嫌挤可以关掉只看价格曲线。
+    ///
+    /// 同主题字段一样**不需要迁移**：`#[serde(default = "default_true")]`
+    /// 补默认值。资金流数据照常后台轮询（提醒与设置页可能还要用），
+    /// 开关只影响悬浮窗渲染。
+    #[serde(default = "default_true")]
+    pub show_fund_flow: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 界面主题。
@@ -304,6 +366,7 @@ impl Default for AppearanceConfig {
             // None 而非 Some(Dark)：让"没设置过"和"显式选了深色"在配置文件里可区分，
             // 将来若要加"跟随系统"就不必再改语义
             theme: None,
+            show_fund_flow: true,
         }
     }
 }
@@ -394,6 +457,8 @@ impl AppConfig {
         // 刷新间隔必须钳到安全区间：配置文件可被手改，
         // 手写 minute_secs=1 会让 20 只自选股变成 20 请求/秒，被上游限流拉黑
         self.refresh.sanitize();
+        // MA 周期列表同理：手写 [1, 999, 999] 不能进 state
+        self.charts.sanitize();
 
         let mut seen: Vec<String> = Vec::new();
         let mut kept: Vec<WatchItem> = Vec::new();

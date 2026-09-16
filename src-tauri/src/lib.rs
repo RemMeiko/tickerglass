@@ -70,6 +70,10 @@ pub fn run() {
             ipc::delete_alert_sound,
             ipc::demo_alert_popup,
             ipc::update_refresh,
+            ipc::update_ma_periods,
+            ipc::show_flow_tip,
+            ipc::hide_flow_tip,
+            ipc::flow_tip_current,
         ])
         .setup(|app| {
             let handle = app.handle().clone();

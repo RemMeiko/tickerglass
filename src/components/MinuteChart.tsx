@@ -71,7 +71,9 @@ export default function MinuteChart({
 
     const prevClose = series.prev_close;
 
-    // 昨收基准线始终可画（它是基准线，不是行情曲线）
+    // 昨收基准线（= 分时图的 0 轴）始终可画（它是基准线，不是行情曲线）。
+    // v0.3.0 需求 1：透明度 0.35 → 0.45 —— 用户反馈小窗口里"看不到 0 轴"，
+    // 0.35 在浅色壁纸上几乎融进背景
     if (prevClose !== null && Number.isFinite(prevClose) && prevClose > 0) {
       const scaleForBase = makeYScale(
         available ? series.points : [],
@@ -80,7 +82,7 @@ export default function MinuteChart({
       );
       const y = scaleForBase ? scaleForBase.toY(prevClose) : height / 2;
       ctx.save();
-      ctx.strokeStyle = "rgba(200,205,215,0.35)";
+      ctx.strokeStyle = "rgba(200,205,215,0.45)";
       ctx.lineWidth = 1;
       ctx.setLineDash([2, 2]);
       ctx.beginPath();
@@ -95,6 +97,38 @@ export default function MinuteChart({
 
     const scale = makeYScale(series.points, prevClose, height);
     if (!scale) return;
+
+    // ── 均价线（v0.3.0 需求 1）：黄色实线，画在价格线下层。
+    // 颜色与日K 的 MA5 黄一致（#e8b64c）—— 全应用"黄色=均价/均线"一种语义。
+    // 点位来自后端（累计额/累计量，量纲按市场处理），前端不算不猜；
+    // 无均价数据的老序列（全 null）一个点都画不出来，自然跳过
+    const avgPoints = series.points.filter((p) => p.avg != null);
+    if (avgPoints.length >= 2) {
+      ctx.save();
+      ctx.globalAlpha = Number.isFinite(alpha)
+        ? Math.min(1, Math.max(0.35, alpha)) // 均价线最低保 0.35 可见度
+        : 1;
+      ctx.strokeStyle = "rgba(232,180,76,0.9)";
+      ctx.lineWidth = Math.max(1, (Number.isFinite(lineWidth) && lineWidth > 0 ? lineWidth : 1.2) * 0.75);
+      ctx.beginPath();
+      let started = false;
+      series.points.forEach((p) => {
+        if (p.avg == null) {
+          // 均价断档（个别点缺量额）就断线，不跨接 —— 与价格线 break_before 同一纪律
+          started = false;
+          return;
+        }
+        const x = xOfGridIndex(p.grid_index, series.grid_len, width);
+        const y = scale.toY(p.avg);
+        if (started) ctx.lineTo(x, y);
+        else {
+          ctx.moveTo(x, y);
+          started = true;
+        }
+      });
+      ctx.stroke();
+      ctx.restore();
+    }
 
     ctx.save();
     // 曲线不透明度用 globalAlpha：只作用于本 canvas 的绘制，
@@ -190,6 +224,11 @@ export default function MinuteChart({
           >
             {hover.pt.price.toFixed(2)}
           </span>
+          {hover.pt.avg != null && (
+            <span className="mc-avg" title="均价（累计成交额/累计成交量）">
+              均 {hover.pt.avg.toFixed(2)}
+            </span>
+          )}
           {hoverPct !== null && (
             <span
               className="mc-c"

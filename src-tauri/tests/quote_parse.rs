@@ -281,3 +281,54 @@ fn html_or_garbage_input_never_panics() {
     let _ = parse_line("完全不相关的一行文本");
     let _ = parse_line("v_=\"\";");
 }
+
+// ---------- 成交额（v0.3.0 需求 5）：[38] 万元 → 元 ----------
+
+#[test]
+fn amount_field_38_converts_wan_to_yuan() {
+    // 实测茅台 2026-09-16 11:22：[37]=17359（手）[38]=219045（万元）
+    // 与分时接口累计额 2,190,454,599 元对上（219045万 × 10000）
+    let mut f: Vec<&str> = vec!["1"; 39];
+    f[1] = "贵州茅台";
+    f[2] = "600519";
+    f[3] = "1700.00";
+    f[4] = "1690.00";
+    f[5] = "1695.00";
+    f[30] = "20260916112239";
+    f[31] = "10.00";
+    f[32] = "0.59";
+    f[33] = "1710.00";
+    f[34] = "1690.00";
+    f[38] = "219045";
+    let line = format!("v_sh600519=\"{}\";", f.join("~"));
+    match parse_line(&line) {
+        QuoteParseOutcome::Ok(q) => {
+            assert_eq!(q.amount, Some(2_190_450_000.0), "万元×10000 折元");
+        }
+        other => panic!("应解析成功，实际 {other:?}"),
+    }
+}
+
+#[test]
+fn amount_missing_or_dash_is_none() {
+    // 港股/美股部分形态不带 [38]，或值是 "-"：必须是 None 而不是 0
+    let mut f: Vec<&str> = vec!["1"; 34]; // 只有 34 段：[38] 越界
+    f[1] = "腾讯控股";
+    f[2] = "00700";
+    f[3] = "438.800";
+    f[4] = "440.000";
+    let line = format!("v_hk00700=\"{}\";", f.join("~"));
+    match parse_line(&line) {
+        QuoteParseOutcome::Ok(q) => assert_eq!(q.amount, None),
+        other => panic!("应解析成功，实际 {other:?}"),
+    }
+
+    let mut f2: Vec<&str> = vec!["1"; 39];
+    f2[3] = "438.800";
+    f2[38] = "-";
+    let line2 = format!("v_hk00700=\"{}\";", f2.join("~"));
+    match parse_line(&line2) {
+        QuoteParseOutcome::Ok(q) => assert_eq!(q.amount, None, "占位符 - 必须是 None"),
+        other => panic!("应解析成功，实际 {other:?}"),
+    }
+}

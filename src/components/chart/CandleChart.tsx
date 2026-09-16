@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { KlineBar } from "../../types";
+import type { KlineBar, MaLine, Market } from "../../types";
 import { changeColor, type Theme } from "../../lib/colors";
-import type { Market } from "../../types";
 
 interface Props {
   bars: KlineBar[];
-  ma5: (number | null)[];
-  ma20: (number | null)[];
+  /** 均线组（周期+逐根值）。v0.3.0 起由配置决定，数量与周期都不再固定 */
+  mas: MaLine[];
   market: Market;
   width: number;
   height: number;
@@ -21,6 +20,23 @@ interface Props {
 /** 量柱区占总高的比例，其余留给蜡烛区 */
 const VOL_RATIO = 0.22;
 const PAD = { left: 52, right: 12, top: 10, bottom: 20 };
+
+/**
+ * 均线配色。前两位是历史色（MA5 黄 / MA20 蓝，v0.2.x 的既有观感，
+ * 配置默认 [5,20] 时按列表顺序取色正好复现）；其余按列表顺序轮转。
+ * 不按"周期→颜色"做稳定映射：8 色轮转下 5/10/15/20 这类等差周期
+ * 会撞同一色相，按顺序轮转的可区分性更好。
+ */
+const MA_PALETTE = [
+  "#e8b64c", // 黄（MA5 位置）
+  "#5b9bd5", // 蓝（MA20 位置）
+  "#c77dff", // 紫
+  "#7fd18c", // 绿
+  "#f2907b", // 橙红
+  "#8fc9e8", // 浅蓝
+  "#d5b899", // 沙色
+  "#a0a8b8", // 灰蓝
+];
 
 /** 鼠标悬停时的十字光标信息 */
 interface HoverInfo {
@@ -37,8 +53,7 @@ interface HoverInfo {
  */
 export default function CandleChart({
   bars,
-  ma5,
-  ma20,
+  mas,
   market,
   width,
   height,
@@ -82,8 +97,8 @@ export default function CandleChart({
       if (b.high > hi) hi = b.high;
       if (b.low < lo) lo = b.low;
     }
-    for (const arr of [ma5, ma20]) {
-      for (const v of arr) {
+    for (const line of mas) {
+      for (const v of line.values) {
         if (v == null) continue;
         if (v > hi) hi = v;
         if (v < lo) lo = v;
@@ -178,7 +193,7 @@ export default function CandleChart({
       ctx.fillRect(x - bodyW / 2, vy, bodyW, volTop + volH - vy);
     }
 
-    // ── 均线
+    // ── 均线（数量与周期由配置决定，颜色按列表顺序取调色板）
     const drawMA = (arr: (number | null)[], stroke: string) => {
       ctx.strokeStyle = stroke;
       ctx.lineWidth = 1.2;
@@ -200,8 +215,9 @@ export default function CandleChart({
       }
       ctx.stroke();
     };
-    drawMA(ma5, "#e8b64c");
-    drawMA(ma20, "#5b9bd5");
+    mas.forEach((line, i) => {
+      drawMA(line.values, MA_PALETTE[i % MA_PALETTE.length]);
+    });
 
     // 缩放内容画完，恢复裁剪。
     // **必须在日期刻度之前恢复** —— 日期画在 plotH + 4（绘图区下方），
@@ -240,8 +256,7 @@ export default function CandleChart({
     // 缩放与平移必须进依赖，否则滚轮改了值画面不重绘
   }, [
     bars,
-    ma5,
-    ma20,
+    mas,
     market,
     width,
     height,
@@ -411,12 +426,17 @@ export default function CandleChart({
                 {hPct.toFixed(2)}%
               </span>
             )}
-            <span className="ro-ma5">
-              MA5 {ma5[hover!.index] != null ? ma5[hover!.index]!.toFixed(2) : "—"}
-            </span>
-            <span className="ro-ma20">
-              MA20 {ma20[hover!.index] != null ? ma20[hover!.index]!.toFixed(2) : "—"}
-            </span>
+            {mas.map((line, i) => (
+              <span
+                key={line.period}
+                style={{ color: MA_PALETTE[i % MA_PALETTE.length] }}
+              >
+                MA{line.period}{" "}
+                {hover && line.values[hover.index] != null
+                  ? line.values[hover.index]!.toFixed(2)
+                  : "—"}
+              </span>
+            ))}
           </>
         ) : (
           <span className="ro-hint">鼠标移到图上看每日详情</span>

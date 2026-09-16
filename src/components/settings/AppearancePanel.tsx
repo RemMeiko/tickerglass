@@ -97,6 +97,15 @@ export default function AppearancePanel({ config }: Props) {
           />
           显示市场标识
         </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            // 旧配置无此字段时按默认开处理（后端 serde default 同值）
+            checked={a.show_fund_flow ?? true}
+            onChange={(e) => patch({ show_fund_flow: e.target.checked })}
+          />
+          悬停显示主力/散户资金
+        </label>
       </div>
 
       <div className="group-title">不透明度（三组互相独立）</div>

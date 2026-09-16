@@ -1,3 +1,4 @@
+pub mod em_fundflow;
 pub mod em_kline;
 pub mod em_market;
 pub mod em_search;

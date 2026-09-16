@@ -1,3 +1,6 @@
+import { useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { RowSnapshot } from "../types";
 import { changeColor } from "../lib/colors";
 import {
@@ -13,6 +16,8 @@ interface Props {
   /** 显示证券代码（关闭时元素不渲染，靠 flex 自然收紧，不留空洞） */
   showCode: boolean;
   showMarket: boolean;
+  /** 显示主力/散户资金流（v0.3.0 需求 6，外观页可关） */
+  showFundFlow: boolean;
   curveWidth: number;
   curveOpacity: number;
   chartWidth: number;
@@ -39,10 +44,45 @@ function staleLabel(row: RowSnapshot): string | null {
   return from_report_time ? `数据过期 ${last_ok_at}` : `数据过期 ${last_ok_at}(本地)`;
 }
 
+/** 悬停资金流提示（v0.3.0 定稿）：
+ *  悬停某行 → 一个独立小提示窗贴在**该行右缘外侧**显示主/散，
+ *  **主窗尺寸完全不动**、图表与悬停读数零影响。
+ *  提示窗内容/显隐全在后端（show_flow_tip 从快照取数），
+ *  前端只负责算「行右缘」的物理屏幕坐标。 */
+function useFlowTipHover(row: RowSnapshot, showFundFlow: boolean, locked: boolean) {
+  /** 进出竞态序号：只认最后一次动作（快速划过多行时旧响应不得关掉新提示） */
+  const seqRef = useRef(0);
+
+  const onEnter = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (locked || !showFundFlow || !row.fund_flow) return;
+    const seq = ++seqRef.current;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const win = getCurrentWindow();
+    Promise.all([win.outerPosition(), win.scaleFactor()])
+      .then(([pos, sf]) => {
+        if (seq !== seqRef.current) return;
+        // 行右缘 + 2px 间隙；垂直居中减半个提示窗高（后端还有显示器边界钳制）
+        const x = pos.x + Math.round(rect.right * sf) + 2;
+        const y =
+          pos.y + Math.round((rect.top + rect.height / 2) * sf) - 17 * Math.round(sf);
+        return invoke("show_flow_tip", { x, y, code: row.code });
+      })
+      .catch((err) => console.error("资金流提示显示失败:", err));
+  };
+
+  const onLeave = () => {
+    seqRef.current++;
+    void invoke("hide_flow_tip").catch(() => void 0);
+  };
+
+  return { onEnter, onLeave };
+}
+
 export default function QuoteRow({
   row,
   showCode,
   showMarket,
+  showFundFlow,
   curveWidth,
   curveOpacity,
   chartWidth,
@@ -59,11 +99,19 @@ export default function QuoteRow({
   const isError = row.state.kind === "error";
   const stale = staleLabel(row);
 
+  const { onEnter: onFlowEnter, onLeave: onFlowLeave } = useFlowTipHover(
+    row,
+    showFundFlow,
+    locked
+  );
+
   return (
     <div
       className="row"
       style={{ opacity: isStale ? 0.62 : 1 }}
       title={locked ? "" : "双击看大图（分时 / 5 日 / 日K）"}
+      onMouseEnter={onFlowEnter}
+      onMouseLeave={onFlowLeave}
       onDoubleClick={(e) => {
         // 锁定态不响应（此时鼠标事件本已被系统穿透，这里是双重保险）
         if (locked) return;

@@ -11,7 +11,6 @@ import {
   dismissConfigNotice,
   fetchConfigNotice,
   openChartWindow,
-  openSettingsWindow,
   resizeMainWindow,
   setCollapsed,
   showContextMenu,
@@ -160,6 +159,7 @@ function Rows({
             row={row}
             showCode={appearance?.show_code ?? false}
             showMarket={appearance?.show_market ?? false}
+            showFundFlow={appearance?.show_fund_flow ?? true}
             curveWidth={appearance?.curve_width ?? 1}
             curveOpacity={appearance?.opacity_curve ?? 1}
             chartWidth={chart.width}
@@ -311,6 +311,22 @@ export default function App() {
     );
   };
 
+  /**
+   * 展开态双击空白处 → 收回小球（用户 2026-09-16 要求）。
+   *
+   * 原先双击空白是「开设置窗」，让位给收球 —— 设置还有三条路：
+   * 右键菜单「设置…」/ 托盘左键单击 / 托盘菜单。而收球此前只有
+   * 右键菜单一条路（window.rs 注释：展开态回到球态的唯一入口），
+   * 与「点球展开」不对称，用户找不回来。行上的双击（看大图）
+   * 已 stopPropagation，不会误触这里。
+   */
+  const handleCollapse = () => {
+    if (locked) return;
+    void setCollapsed(true).catch((e) =>
+      console.error("收起为球失败:", e)
+    );
+  };
+
   // 原先这里有一份「代码 → 名称/市场」映射 + 一条快照订阅，专供已删除的
   // 提醒卡片使用。卡片移到中心弹窗后一并删除 —— PopupApp 自己取快照，
   // 留在这里就是每轮白订阅一次。
@@ -378,22 +394,18 @@ export default function App() {
           // （小于阈值 = 点击展开，超过 = 调 startDragging）。
           {...(locked || isBall ? {} : { "data-tauri-drag-region": true })}
           onDoubleClick={() => {
-            // 锁定态下不响应双击（此时鼠标事件本已被系统穿透，这里是双重保险）
+            // 锁定态不响应双击（此时鼠标事件本已被系统穿透，这里是双重保险）
             if (locked) return;
-            // 球态下双击不开设置：球上单击是"展开"，双击会先触发一次单击、
-            // 紧接着又开设置窗，用户看到的是"点一下弹出两个东西"。
-            // 球态要开设置走右键菜单。
+            // 球态没有「再收」一说；展开态双击空白收为球（见 handleCollapse 注释）
             if (isBall) return;
-            void openSettingsWindow().catch((e) =>
-              console.error("打开设置窗失败:", e)
-            );
+            handleCollapse();
           }}
           title={
             locked
               ? ""
               : isBall
                 ? ""
-                : "右键打开菜单（也可双击此处开设置）"
+                : "右键打开菜单，双击收起为球"
           }
         >
           <ConfigNotice />
