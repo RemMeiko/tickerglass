@@ -538,6 +538,13 @@ pub fn apply_locked(
         .ok_or_else(|| "找不到主窗口".to_string())?;
     win.set_ignore_cursor_events(locked)
         .map_err(|e| e.to_string())?;
+    // 锁定瞬间鼠标事件开始被系统穿透，悬停中的行**永远收不到 mouseleave**
+    // —— 资金流提示卡会悬在屏幕上。锁定路径必须顺手收掉（2026-09-16 bug）。
+    if locked {
+        if let Err(e) = window::hide_flow_tip(app) {
+            log::warn!("[窗口] 锁定时收起资金流提示失败: {e}");
+        }
+    }
     let next = state.update_config(|cfg| {
         cfg.window.locked = locked;
         cfg.clone()

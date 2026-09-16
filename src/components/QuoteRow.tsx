@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { RowSnapshot } from "../types";
@@ -52,6 +52,18 @@ function staleLabel(row: RowSnapshot): string | null {
 function useFlowTipHover(row: RowSnapshot, showFundFlow: boolean, locked: boolean) {
   /** 进出竞态序号：只认最后一次动作（快速划过多行时旧响应不得关掉新提示） */
   const seqRef = useRef(0);
+
+  // **卸载兜底（2026-09-16 bug 修复）**：行被卸载（收起为球/滚轮换页/
+  // 删除自选股/全部隐藏）时**不会派发 mouseleave** —— React 卸载不产生
+  // 鼠标事件，提示卡就永远悬在屏幕上。必须在清理函数里主动收掉，
+  // 并作废在途的 show 请求（否则迟到的 show 会把刚收掉的又亮出来）。
+  useEffect(
+    () => () => {
+      seqRef.current++;
+      void invoke("hide_flow_tip").catch(() => void 0);
+    },
+    []
+  );
 
   const onEnter = (e: React.MouseEvent<HTMLDivElement>) => {
     if (locked || !showFundFlow || !row.fund_flow) return;
