@@ -66,6 +66,28 @@ jobs:
       - name: Test
         run: npx vitest run
 
+      # 组装 Release 正文：安装说明 + 仓库根目录的 RELEASE_NOTES.md（每次
+      # 发版前更新该文件）。多行内容用分隔符写法（<<EOF）进 $GITHUB_OUTPUT，
+      # 不能用 echo body=...（会把换行吃掉）。文件缺失时退回占位文案，
+      # 别让发版因为它挂掉。
+      - name: Compose release body
+        id: body
+        shell: bash
+        run: |
+          NOTES="$(cat RELEASE_NOTES.md 2>/dev/null || echo '（本版更新说明暂缺，见 README）')"
+          {
+            echo 'body<<NOTES_EOF'
+            echo '## 安装'
+            echo ''
+            echo '下载下方 `-setup.exe` 安装包运行即可。未签名 exe 首次运行会被 SmartScreen 拦一次：点「更多信息」→「仍要运行」。'
+            echo ''
+            echo "$NOTES"
+            echo ''
+            echo '---'
+            echo '由 GitHub Actions 自动构建发布。'
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -74,13 +96,7 @@ jobs:
           # tagName 用推上来的那个 tag；releaseName 去掉 v 前缀更好看
           tagName: ${{ github.ref_name }}
           releaseName: TickerGlass ${{ github.ref_name }}
-          releaseBody: |
-            ## 安装
-
-            下载下方 `TickerGlass_x.x.x_x64-setup.exe` 运行即可。
-
-            ---
-            由 GitHub Actions 自动构建发布。
+          releaseBody: ${{ steps.body.outputs.body }}
           # draft: true —— 先发草稿，你在 GitHub 上看一眼产物没问题再点 Publish。
           # 想完全免手动就改成 false，那样推 tag 后直接公开发布。
           releaseDraft: true
