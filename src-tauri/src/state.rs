@@ -21,6 +21,12 @@ pub struct AppState {
     /// **只存内存不落盘**：布防状态是"当前是否已越界过"的运行时判断，
     /// 重启后应当重新布防（否则用户重启程序反而漏掉提醒）。
     arm_states: RwLock<HashMap<(String, RuleKey), ArmState>>,
+    /// 上一次广播给前端的快照语义签名（v0.4.1）。
+    ///
+    /// `0` = 从未广播过。scheduler 在持有快照写锁期间比对
+    /// （锁序 snapshot → last_emit_sig，全库仅 scheduler 一处成对出现），
+    /// 签名相同则跳过 emit —— 夜间/周末/价格未动的周期做到零 IPC。
+    last_emit_sig: RwLock<u64>,
 }
 
 impl AppState {
@@ -30,6 +36,7 @@ impl AppState {
             config: RwLock::new(AppConfig::default()),
             config_notice: RwLock::new(None),
             arm_states: RwLock::new(HashMap::new()),
+            last_emit_sig: RwLock::new(0),
         }
     }
 
@@ -127,6 +134,23 @@ impl AppState {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    /// v0.4.1：快照语义签名比对。相同返回 `false`（跳过广播）；
+    /// 不同则记录新签名并返回 `true`。
+    ///
+    /// 只应在**持有快照写锁**期间调用 —— 保证"比对-记录-写入 updated_at"
+    /// 相对于其他刷新线程是原子的。
+    pub fn check_and_set_emit_sig(&self, sig: u64) -> bool {
+        let mut g = self
+            .last_emit_sig
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if *g == sig {
+            return false;
+        }
+        *g = sig;
+        true
     }
 }
 

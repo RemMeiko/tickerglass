@@ -97,6 +97,103 @@ pub fn plan_minute_batch(
     picked
 }
 
+// ───────────── v0.4.1 性能：快照语义签名 + 休市降频 ─────────────
+
+/// 快照的**语义签名**（v0.4.1）：把"前端可见"的字段压成一个哈希。
+///
+/// # 为什么需要它
+///
+/// 旧版每 3s 无条件 `state.set()` + `emit`：一次快照含全部自选股的当日
+/// 分时（14 只 × ~241 点 ≈ 200KB JSON），克隆两三次再序列化广播给**所有**
+/// 窗口（含隐藏的）——价格没动的周期、夜间、周末全是白烧。
+/// 签名相同 → 跳过 set 的可见效应与 emit → 夜间/周末零 IPC。
+///
+/// # 覆盖范围（前端渲染读到的字段）
+///
+/// 每行的 code/hidden/name、报价（价/昨收/涨跌幅/涨跌额/小数位/报文时间/
+/// 成交额）、状态机、minute_available、分时（长度+末点+昨收基准——分钟粒度
+/// 数据中间点不会变，末点与长度足够代表"曲线变了"）、资金流（主/散两值
+/// 即悬浮窗与提示窗渲染用到的全部）。
+///
+/// **刻意不包含** `updated_at`（它是"数据变了"的结果而不是原因）与
+/// `market`/`is_index`（行生命周期内不变）。同一行换入内容完全相同的
+/// 分时序列也视为未变——语义等价，跳过无害。
+pub fn snapshot_signature(snap: &Snapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    snap.quote_ok.hash(&mut h);
+    for r in &snap.rows {
+        r.code.hash(&mut h);
+        r.hidden.hash(&mut h);
+        r.name.hash(&mut h);
+        match &r.quote {
+            Some(q) => {
+                b"Q".hash(&mut h);
+                q.price.map(f64::to_bits).hash(&mut h);
+                q.prev_close.map(f64::to_bits).hash(&mut h);
+                q.change.amount.map(f64::to_bits).hash(&mut h);
+                q.change.percent.map(f64::to_bits).hash(&mut h);
+                q.price_decimals.hash(&mut h);
+                q.quote_time.hash(&mut h);
+                q.raw_timestamp.hash(&mut h);
+                q.amount.map(f64::to_bits).hash(&mut h);
+            }
+            None => b"q".hash(&mut h),
+        }
+        match &r.state {
+            crate::model::DataState::Pending => b"P".hash(&mut h),
+            crate::model::DataState::Fresh => b"F".hash(&mut h),
+            crate::model::DataState::Stale { last_ok_at, .. } => {
+                b"S".hash(&mut h);
+                last_ok_at.hash(&mut h);
+            }
+            crate::model::DataState::Error { message } => {
+                b"E".hash(&mut h);
+                message.hash(&mut h);
+            }
+        }
+        r.minute_available.hash(&mut h);
+        match &r.minute {
+            Some(s) => {
+                b"M".hash(&mut h);
+                s.prev_close.map(f64::to_bits).hash(&mut h);
+                s.points.len().hash(&mut h);
+                if let Some(last) = s.points.last() {
+                    last.hhmm.hash(&mut h);
+                    last.price.to_bits().hash(&mut h);
+                    last.avg.map(f64::to_bits).hash(&mut h);
+                }
+            }
+            None => b"m".hash(&mut h),
+        }
+        match &r.fund_flow {
+            Some(f) => {
+                b"$".hash(&mut h);
+                f.main_net.to_bits().hash(&mut h);
+                f.retail_net.to_bits().hash(&mut h);
+            }
+            None => b"s".hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
+/// 报价链路的实际间隔（v0.4.1）。
+///
+/// 所有自选市场都休市时，价格不会再动，3s 轮询纯属浪费
+/// （每轮都是解析+克隆+广播的完整工作量）——钳到 ≥30s。
+/// 有任一市场在盘中则用用户配置值（报价是批量的，间隔与数量无关）。
+pub fn effective_quote_secs(configured: u64, any_in_session: bool) -> u64 {
+    if any_in_session {
+        configured
+    } else {
+        configured.max(IDLE_QUOTE_SECS_MIN)
+    }
+}
+
+/// 休市时报价间隔下限（秒）。提醒判定本就按交易时段门控，降频无副作用。
+const IDLE_QUOTE_SECS_MIN: u64 = 30;
+
 /// 本地时间 `HH:MM:SS`。大盘面板（`ipc::fetch_market_overview`）也用它，
 /// 故为 `pub` —— 两处各写一份格式串会导致时间显示风格不一致。
 pub fn now_hms() -> String {
@@ -230,9 +327,22 @@ pub fn spawn(app: AppHandle) {
                 //
                 // 只在值**真的变了**时重建：每轮无条件重建会重置计时起点，
                 // 导致 CONFIG_CHANGED 频繁触发时（比如拖动某个滑块）刷新节奏被打乱。
-                let want = state.config().refresh.quote_secs;
+                //
+                // v0.4.1：实际间隔还要过 [`effective_quote_secs`] ——
+                // 所有自选市场都休市时钳到 ≥30s（价格不会再动，快轮询纯浪费）。
+                let items = state.config().watchlist;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let any_in_session = items
+                    .iter()
+                    .any(|it| crate::domain::trading_session::in_session(it.market, now_ms));
+                let want =
+                    effective_quote_secs(state.config().refresh.quote_secs, any_in_session);
                 if want != cur_secs {
-                    log::info!("[报价] 刷新间隔 {cur_secs}s → {want}s");
+                    log::info!("[报价] 刷新间隔 {cur_secs}s → {want}s{}", if any_in_session {
+                        ""
+                    } else {
+                        "（休市降频）"
+                    });
                     cur_secs = want;
                     tick = tokio::time::interval(Duration::from_secs(cur_secs));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -242,14 +352,12 @@ pub fn spawn(app: AppHandle) {
                 } else {
                     Backoff::fast()
                 };
-                // 每轮重读配置：用户增删改序后立刻生效
-                let items = state.config().watchlist;
-                if refresh_quotes(&fetcher, &state, &items, policy).await {
+                // refresh_quotes 内部完成"锁内直写 + 签名比对广播"（v0.4.1）
+                if refresh_quotes(&fetcher, &app, &state, &items, policy).await {
                     first_paint_done = true;
                 }
                 // 提醒判定跟着报价周期跑（分时链路不需要，价格只来自报价）
                 evaluate_alerts(&app, &state);
-                emit_snapshot(&app, &state);
             }
         });
     }
@@ -328,16 +436,18 @@ pub fn spawn(app: AppHandle) {
                 } else {
                     Backoff::fast()
                 };
-                let outcome = refresh_minutes(&fetcher, &state, &selected, policy, |code, series| {
+                // v0.4.1：成功序列经返回值交回（缓存写盘挪到锁外，广播在锁内签名门后）
+                let (outcome, oks) =
+                    refresh_minutes(&fetcher, &app, &state, &selected, policy).await;
+                for series in &oks {
                     // 成功记账 + 点数变了才写当日缓存
-                    let k = code.to_ascii_lowercase();
+                    let k = series.code.to_ascii_lowercase();
                     last_ok.insert(k.clone(), std::time::Instant::now());
                     if cached_points.get(&k) != Some(&series.points.len()) {
                         minute_cache::save_series(series);
                         cached_points.insert(k, series.points.len());
                     }
-                })
-                .await;
+                }
                 if outcome.any_ok {
                     first_paint_done = true;
                 }
@@ -355,7 +465,6 @@ pub fn spawn(app: AppHandle) {
                     consecutive_failures = 0;
                     cooldown_until = None;
                 }
-                emit_snapshot(&app, &state);
             }
         });
     }
@@ -391,9 +500,11 @@ pub fn spawn(app: AppHandle) {
                 let idx = batch_cursor % batches.len();
                 batch_cursor = batch_cursor.wrapping_add(1);
                 let refs: Vec<&str> = batches[idx].iter().map(|s| s.as_str()).collect();
-                if refresh_fund_flows(&fetcher, &state, &items, &refs).await.is_ok() {
-                    emit_snapshot(&app, &state);
-                } else {
+                // 广播已收进 refresh_fund_flows 的签名门后（v0.4.1）
+                if refresh_fund_flows(&fetcher, &app, &state, &items, &refs)
+                    .await
+                    .is_err()
+                {
                     // 限流/网络失败都是预期内的常态：保留旧值，下一轮再来。
                     // 不打 warn 刷屏 —— debug 足够
                     log::debug!("[资金流] 第 {}/{} 批本轮未更新", idx + 1, batches.len());
@@ -412,10 +523,12 @@ const FLOW_BATCH_SIZE: usize = 40;
 
 /// 拉一批 secid 的当日资金流并写进快照。整批一个请求；失败时保留旧值。
 ///
+/// v0.4.1：写锁内直写 + 签名门广播（与 quote/minute 同一纪律）。
 /// 返回 `Err` 只用于调用方记日志；行级匹配不上的（响应缺行，如美股无数据）
 /// 保持 `fund_flow: None`，不清空已有值 —— 与 quote/minute 的"失败不清空"同一纪律。
 async fn refresh_fund_flows(
     fetcher: &Fetcher,
+    app: &AppHandle,
     state: &Arc<AppState>,
     items: &[WatchItem],
     secids: &[&str],
@@ -426,7 +539,7 @@ async fn refresh_fund_flows(
     let by_secid: std::collections::HashMap<&str, _> =
         flows.iter().map(|(s, f)| (s.as_str(), f)).collect();
 
-    let mut snap = state.get();
+    let mut snap = state.write();
     for item in items {
         let Some(secid) = item.em_secid.as_deref() else {
             continue;
@@ -442,13 +555,22 @@ async fn refresh_fund_flows(
             row.fund_flow = Some(**flow);
         }
     }
-    state.set(snap);
+    emit_snapshot_locked(app, state, &mut snap);
+    drop(snap);
     Ok(())
 }
 
-fn emit_snapshot(app: &AppHandle, state: &Arc<AppState>) {
-    let snap = state.get();
-    if let Err(e) = app.emit("snapshot", &snap) {
+/// 广播快照（v0.4.1 收口为一处）：调用方必须持有快照写锁 `snap`。
+///
+/// 签名没变（价格/曲线/状态/资金流全部未动）就不广播 —— 夜间/周末做到零 IPC，
+/// 隐藏着的设置/大图窗也不会再每 3s 收一次 200KB 的无效载荷。
+fn emit_snapshot_locked(app: &AppHandle, state: &Arc<AppState>, snap: &mut Snapshot) {
+    let sig = snapshot_signature(snap);
+    if !state.check_and_set_emit_sig(sig) {
+        return;
+    }
+    snap.updated_at = now_hms();
+    if let Err(e) = app.emit("snapshot", &*snap) {
         log::warn!("快照事件发送失败: {e}");
     }
 }
@@ -456,10 +578,14 @@ fn emit_snapshot(app: &AppHandle, state: &Arc<AppState>) {
 /// 报价刷新。一次请求带全部代码；响应**必须**经 `reconcile` 才能进 state，
 /// 否则响应里整行缺失的标的会从界面上消失（实测 `sh999999` 就是整行不出现）。
 ///
+/// v0.4.1：应用结果改为**写锁内直写**（旧版 get→改→set 是两次全量克隆），
+/// 广播走 [`emit_snapshot_locked`] 的签名门。
+///
 /// `policy` 决定失败后是否原地快速重试（首屏用 `Backoff::fast()`，稳态用 `Backoff::none()`）。
 /// 返回值 = 本次是否拿到了可用响应，调用方用它判断首屏是否已完成。
 async fn refresh_quotes(
     fetcher: &Fetcher,
+    app: &AppHandle,
     state: &Arc<AppState>,
     items: &[WatchItem],
     policy: Backoff,
@@ -529,10 +655,10 @@ async fn refresh_quotes(
         results.push((batch.clone(), outcomes));
     }
 
-    // 汇总所有批的结果 → 一次性落 state
+    // 汇总所有批的结果 → 写锁内一次性应用（v0.4.1：不再 get→改→set 两次全量克隆）
     let (by_code, failed_codes) = merge_batch_results(results);
 
-    let mut snap = state.get();
+    let mut snap = state.write();
     snap.quote_ok = any_ok;
     for row in snap.rows.iter_mut() {
         let k = row.code.to_ascii_lowercase();
@@ -557,8 +683,8 @@ async fn refresh_quotes(
             Some(_) | None => mark_stale(row, "该标的本次无有效数据"),
         }
     }
-    snap.updated_at = now_hms();
-    state.set(snap);
+    emit_snapshot_locked(app, state, &mut snap);
+    drop(snap);
     any_ok
 }
 
@@ -642,8 +768,10 @@ struct MinuteBatchOutcome {
 /// A 股/指数/港股走腾讯 minute；**美股走东财 trends2**
 /// （实测腾讯 `minute/query?code=usAAPL` 只返回 1 个点，画不出折线）。
 ///
-/// v0.4.0：只刷**传入的这批**（由 [`plan_minute_batch`] 选出），
-/// 每次成功经 `on_success` 回调报给调度方（记账 + 写当日缓存）。
+/// v0.4.0：只刷**传入的这批**（由 [`plan_minute_batch`] 选出）。
+/// v0.4.1：网络段全部完成后**一个写锁批量应用**（旧版每标的一次
+/// get→改→set 全量克隆对），成功序列随返回值交回（缓存在锁外写），
+/// 广播走 [`emit_snapshot_locked`] 的签名门。
 /// 每个标的独立处理，单标的失败不影响其他标的与后续周期。
 /// 拿不到序列时**不画曲线**（`minute_available = false`），
 /// 绝不用单点/昨收线/插值补假曲线。
@@ -651,12 +779,15 @@ struct MinuteBatchOutcome {
 /// `policy` 每个标的各持一份副本（退避额度不跨标的共享）。
 async fn refresh_minutes(
     fetcher: &Fetcher,
+    app: &AppHandle,
     state: &Arc<AppState>,
     items: &[WatchItem],
     policy: Backoff,
-    mut on_success: impl FnMut(&str, &MinuteSeries),
-) -> MinuteBatchOutcome {
+) -> (MinuteBatchOutcome, Vec<MinuteSeries>) {
     let mut out = MinuteBatchOutcome::default();
+    // ── 网络段（不持锁）：逐标的取数 ──
+    let mut results: Vec<(&WatchItem, Result<MinuteSeries, String>)> =
+        Vec::with_capacity(items.len());
     for item in items {
         let mut policy = policy.clone();
         let result = loop {
@@ -682,7 +813,7 @@ async fn refresh_minutes(
             }
         };
 
-        // 冷却记账（在动 state 之前完成判定，不依赖快照内容）
+        // 冷却记账（与快照内容无关）
         match &result {
             Ok(_) => {
                 out.any_ok = true;
@@ -696,43 +827,49 @@ async fn refresh_minutes(
                 }
             }
         }
+        results.push((item, result));
+    }
 
-        let mut snap = state.get();
-        if let Some(row) = snap
+    // ── 应用段：一个写锁批量落 state ──
+    let mut oks: Vec<MinuteSeries> = Vec::with_capacity(results.len());
+    let mut snap = state.write();
+    for (item, result) in results {
+        let Some(row) = snap
             .rows
             .iter_mut()
             .find(|r| r.code.eq_ignore_ascii_case(&item.tencent_code))
-        {
-            match result {
-                Ok(series) => {
-                    if series.points.is_empty() {
-                        // 空序列（盘前 / 全部点落在栅格外）：不画曲线，如实标记。
-                        // 通道本身是通的（拿到合法响应），对冷却是"成功"
-                        row.minute_available = false;
-                        row.minute = Some(series);
-                    } else {
-                        let mut series = series;
-                        if series.prev_close.is_none() {
-                            series.prev_close =
-                                row.quote.as_ref().and_then(|q| q.prev_close);
-                        }
-                        row.minute_available = true;
-                        on_success(&item.tencent_code, &series);
-                        row.minute = Some(series);
+        else {
+            continue;
+        };
+        match result {
+            Ok(series) => {
+                if series.points.is_empty() {
+                    // 空序列（盘前 / 全部点落在栅格外）：不画曲线，如实标记。
+                    // 通道本身是通的（拿到合法响应），对冷却是"成功"
+                    row.minute_available = false;
+                    row.minute = Some(series);
+                } else {
+                    let mut series = series;
+                    if series.prev_close.is_none() {
+                        series.prev_close = row.quote.as_ref().and_then(|q| q.prev_close);
                     }
+                    row.minute_available = true;
+                    row.minute = Some(series.clone());
+                    oks.push(series);
                 }
-                Err(msg) => {
-                    log::warn!("[分时] {} 失败: {msg}", item.tencent_code);
-                    // 保留上次曲线，不清空、不伪造
-                    if row.minute.is_none() {
-                        row.minute_available = false;
-                    }
+            }
+            Err(msg) => {
+                log::warn!("[分时] {} 失败: {msg}", item.tencent_code);
+                // 保留上次曲线，不清空、不伪造
+                if row.minute.is_none() {
+                    row.minute_available = false;
                 }
             }
         }
-        state.set(snap);
     }
-    out
+    emit_snapshot_locked(app, state, &mut snap);
+    drop(snap);
+    (out, oks)
 }
 
 /// 启动时预载当日分时缓存（v0.4.0）：曲线随首屏出现，零网络请求。

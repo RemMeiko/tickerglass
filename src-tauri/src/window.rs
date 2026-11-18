@@ -151,6 +151,16 @@ pub fn clamp_window_position(win: &WebviewWindow) -> Option<(f64, f64)> {
     let pos = win.outer_position().ok()?.to_logical::<f64>(sf);
     let size = win.outer_size().ok()?.to_logical::<f64>(sf);
     let current = Rect::new(pos.x, pos.y, size.width, size.height);
+
+    // v0.4.1 根治（80% CPU 自旋的真正根因）：**最小化停车坐标不是越界**。
+    // Windows 把最小化窗口停在 (-32000,-32000)；旧逻辑把它当越界强行拉回，
+    // Windows 发现仍是最小化态又停回去 → Moved → 再拉回 → 每秒几百次
+    // SetWindowPos 的主线程死循环（实测一秒内刷出几十万字节日志）。
+    // 停车坐标一律放行，交给最小化守卫转隐藏。
+    if current.x <= -30000.0 || current.y <= -30000.0 {
+        return None;
+    }
+
     let monitors = monitor_rects(win);
 
     let clamped = clamp_into_monitors(current, &monitors);
@@ -199,7 +209,11 @@ pub fn apply_window_config(app: &AppHandle) {
     };
 
     if let (Some(x), Some(y)) = (cfg.window.x, cfg.window.y) {
-        if let Err(e) = win.set_position(LogicalPosition::new(x as f64, y as f64)) {
+        // v0.4.1：停车坐标（≤-30000，历史上钳制风暴污染进配置的垃圾）
+        // 不恢复——按 tauri.conf 的默认位置出现，比恢复到屏幕外好
+        if x <= -30000 || y <= -30000 {
+            log::warn!("[窗口] 配置里的窗口位置 ({x},{y}) 是最小化停车垃圾，忽略");
+        } else if let Err(e) = win.set_position(LogicalPosition::new(x as f64, y as f64)) {
             log::warn!("[窗口] 恢复位置失败: {e}");
         }
     }
@@ -238,9 +252,8 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     .build()
     .map_err(|e| e.to_string())?;
     win.set_focus().ok();
-    // 与 register_close_to_hide 保持一致：万一走到这条重建路径，
-    // 也要把「关闭改隐藏」挂回去，否则关一次就又回到会 build() 的状态
-    attach_close_to_hide(&win);
+    // 万一走到这条重建路径，也要把窗口守卫挂回去（关闭销毁 + 最小化隐藏）
+    attach_secondary_guards(&win);
     Ok(())
 }
 
@@ -295,9 +308,9 @@ pub fn open_chart(app: &AppHandle, code: &str, name: Option<&str>) -> Result<(),
     .visible(true)
     .build()
     .map_err(|e| e.to_string())?;
-    // 大图窗是懒建的，启动时挂不上，建完立刻补挂「关闭改隐藏」——
-    // 否则用户关掉它之后再双击又会走 build()，回到死锁那条路上
-    attach_close_to_hide(&win);
+    // 大图窗是懒建的，启动时挂不上，建完立刻补挂窗口守卫
+    //（关闭销毁 + 最小化隐藏，v0.4.1 行为）
+    attach_secondary_guards(&win);
     win.set_focus().ok();
     Ok(())
 }
@@ -306,7 +319,7 @@ pub fn open_chart(app: &AppHandle, code: &str, name: Option<&str>) -> Result<(),
 ///
 /// 与 [`open_chart`] 同构，两个要点同样适用（都是踩过的坑）：
 /// 1. 调用方必须是 **`async` 命令** —— 同步命令里跑 `build()` 会与主线程事件循环互等死锁
-/// 2. `build()` 之后必须 `attach_close_to_hide`，否则用户关掉后再开又走 `build()`
+/// 2. `build()` 之后必须 `attach_secondary_guards`（关闭销毁 + 最小化隐藏）
 ///
 /// 还有第三个坑不在这个函数里：`market` 必须写进
 /// `capabilities/default.json` 的 `windows` 列表。漏了的话该窗口的
@@ -335,7 +348,7 @@ pub fn open_market(app: &AppHandle) -> Result<(), String> {
     .visible(true)
     .build()
     .map_err(|e| e.to_string())?;
-    attach_close_to_hide(&win);
+    attach_secondary_guards(&win);
     win.set_focus().ok();
     Ok(())
 }
@@ -348,7 +361,7 @@ const POPUP_H: f64 = 150.0;
 ///
 /// 与 [`open_chart`]/[`open_market`] 的三个共同要点都适用（都是踩过的坑）：
 /// 1. 调用方必须是 **`async` 命令** —— 同步命令里跑 `build()` 会与主线程事件循环互等死锁
-/// 2. `build()` 之后必须 `attach_close_to_hide`
+/// 2. `build()` 之后必须 `attach_secondary_guards`
 /// 3. `popup` 必须写进 `capabilities/default.json` 的 `windows` 列表，
 ///    否则该窗口的 `listen()` 会被**静默拒绝**（无报错）—— 这个窗口靠
 ///    监听 `alert` 事件工作，漏了就是"弹窗永远不出现"且查不到原因
@@ -436,7 +449,7 @@ pub fn ensure_popup(app: &AppHandle) -> Result<(), String> {
     .visible(false)
     .build()
     .map_err(|e| e.to_string())?;
-    attach_close_to_hide(&win);
+    attach_secondary_guards(&win);
     place_popup_center(&win)?;
     // **不 show**：等前端收到 alert 事件、真的有内容可画时它自己 show。
     // 见本函数顶部说明 —— 在这里 show 会留下一个永不消失的空窗口。
@@ -598,44 +611,141 @@ pub fn popup_context_menu(
     Ok(())
 }
 
-/// 把「关闭窗口」改成「隐藏窗口」（设置窗、大图窗、大盘窗，不含主窗口）。
+/// 二级窗口（设置/大图/大盘）的窗口守卫（v0.4.1 行为变更）：
 ///
-/// 这是死锁的**根因修复**，比把命令改 async 更靠前一层：
+/// - **关闭 → 销毁**（旧版是隐藏保活）。隐藏保活让 WebView2 进程在"关闭"后
+///   永久常驻——跑得越久、开过的窗口越多，内存只涨不降（用户实测投诉）。
+///   销毁的代价是下次打开要重建 webview（约半秒），且打开入口
+///   （`open_settings_window` 等）全部是 async 命令，重建路径不存在
+///   同步 `build()` 的死锁风险（那才是当年改隐藏的根因，已从命令层修掉）。
+/// - **最小化 → 隐藏**（见 [`attach_minimize_to_hide`]）。
 ///
-/// Tauri 默认「关闭即销毁」。设置窗虽然在 `tauri.conf.json` 里预建了
-/// （`visible: false`），但一旦用户点了关闭按钮，窗口就被销毁 ——
-/// 于是下次开设置时 `get_webview_window` 拿不到窗口，只能走 `build()`。
-/// 从托盘菜单进来时 `build()` 跑在主线程上，与事件循环互等，直接冻死整个 UI。
-///
-/// 改成隐藏后，两个窗口在整个进程生命周期里只 `build()` 一次，
-/// 之后永远走 `show()` 复用分支，从任何线程调用都安全。
-/// 附带好处：再次打开是秒开（WebView 不用重建），且保留了上次的滚动位置与 Tab。
-///
-/// 主窗口不在此列：它是悬浮窗本体，`decorations: false` 没有关闭按钮，
+/// 主窗口不走关闭守卫：`decorations: false` 没有关闭按钮，
 /// 真要关闭是走托盘「退出」→ `app.exit(0)`。
-pub fn register_close_to_hide(app: &AppHandle) {
+pub fn register_window_guards(app: &AppHandle) {
+    // 主窗口只挂最小化守卫
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        attach_minimize_to_hide(&win);
+    }
     for label in [SETTINGS_LABEL, CHART_LABEL, MARKET_LABEL] {
-        let Some(win) = app.get_webview_window(label) else {
-            // 大图窗/大盘窗是懒建的，启动时不存在很正常 ——
-            // 它们在 open_chart / open_market 里建完会各自补挂
-            continue;
-        };
-        attach_close_to_hide(&win);
+        // 设置窗 v0.4.1 起不再预建；大图/大盘本就懒建 —— 启动时多半不存在，
+        // 它们在各自 open_* / build 处补挂
+        if let Some(win) = app.get_webview_window(label) {
+            attach_secondary_guards(&win);
+        }
     }
 }
 
-/// 给单个窗口挂上「关闭改隐藏」。懒建的窗口在 `build()` 之后调用。
-pub fn attach_close_to_hide(win: &WebviewWindow) {
+/// 给二级窗口挂全套守卫（关闭销毁 + 最小化隐藏）。懒建窗口在 `build()` 后调用。
+pub fn attach_secondary_guards(win: &WebviewWindow) {
+    attach_close_to_destroy(win);
+    attach_minimize_to_hide(win);
+}
+
+/// 关闭即销毁：`destroy()` 不再触发 `CloseRequested`（不会递归），
+/// WebView2 进程随之释放。
+pub fn attach_close_to_destroy(win: &WebviewWindow) {
     let handle = win.clone();
     let label = win.label().to_string();
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
-            if let Err(e) = handle.hide() {
-                log::warn!("[窗口] {label} 隐藏失败: {e}");
+            if let Err(e) = handle.destroy() {
+                log::warn!("[窗口] {label} 销毁失败: {e}");
+            } else {
+                log::debug!("[窗口] {label} 关闭 → 已销毁（webview 内存释放）");
             }
         }
     });
+}
+
+/// 最小化 → 隐藏（v0.4.1，本文件最重要的一条）。
+///
+/// 实测（2026-11-18）：窗口最小化后（Win+D「显示桌面」/手动最小化），
+/// **高频快照广播打进最小化窗口的 webview 会让主线程忙轮询**——
+/// v0.4.0 退化实例：3s 全量 ~200KB emit × 最小化主窗 = 单核 75~80% 空转；
+/// 同为最小化但 emit 被签名门+休市降频压到近零的 v0.4.1 实例只有 2.5%。
+/// 也就是说自旋需要"最小化 + 高频 IPC"叠加，两道都要防：
+/// emit 侧已由签名门/降频治理（scheduler），窗口侧由本守卫兜底——
+/// 盘中价格持续在动、emit 停不下来时，最小化窗口必须立刻转隐藏。
+/// 悬浮窗类工具没有"最小化"的合理场景；恢复走托盘「显示悬浮窗」
+/// 或再次打开对应入口。
+///
+/// # 检测方式（两道，看门狗为主）
+///
+/// 1. **IsIconic 看门狗**（[`spawn_minimize_watchdog`]，主防线）：
+///    实测本机 tao 版本最小化时**不**发 `Resized(0x0)`（v0.4.1 实测
+///    SW_MINIMIZE 后无任何 Resized 事件），事件路径靠不住，
+///    改为 5s 轮询 `IsIconic(hwnd)` —— 确定性生效，最多滞后 5s。
+/// 2. **Resized 0x0 事件**（下方 handler，副防线）：若未来 tao 版本
+///    开始发这个事件（其他平台/路径），直接零延迟转隐藏。
+pub fn attach_minimize_to_hide(win: &WebviewWindow) {
+    let handle = win.clone();
+    let label = win.label().to_string();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::Resized(sz) = event {
+            if sz.width == 0 || sz.height == 0 {
+                log::info!("[窗口] {label} 最小化(Resized 0x0) → 转隐藏（防事件循环空转）");
+                if let Err(e) = handle.hide() {
+                    log::warn!("[窗口] {label} 隐藏失败: {e}");
+                }
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn IsIconic(hwnd: *mut core::ffi::c_void) -> i32;
+}
+
+/// 最小化看门狗（v0.4.1 主防线）：每 5s 轮询全部窗口的 `IsIconic`，
+/// 发现最小化立即转隐藏。轮询本身开销可忽略（每轮几次 Win32 调用）。
+///
+/// 恢复通道：主窗口走托盘「显示悬浮窗」；二级窗口走各自打开入口
+/// （open_* 都带 show + unminimize）。
+pub fn spawn_minimize_watchdog(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            for label in [
+                MAIN_LABEL,
+                SETTINGS_LABEL,
+                CHART_LABEL,
+                MARKET_LABEL,
+                POPUP_LABEL,
+                FLOW_TIP_LABEL,
+            ] {
+                let Some(win) = handle.get_webview_window(label) else {
+                    continue;
+                };
+                let Ok(hwnd) = win.hwnd() else {
+                    continue;
+                };
+                // SAFETY: hwnd 来自 tauri 持有的活窗口；IsIconic 是纯查询
+                let iconic = unsafe { IsIconic(hwnd.0 as *mut core::ffi::c_void) } != 0;
+                if iconic {
+                    log::info!("[窗口] {label} 最小化(看门狗) → 转隐藏（防事件循环空转）");
+                    if let Err(e) = win.hide() {
+                        log::warn!("[窗口] {label} 隐藏失败: {e}");
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// 托盘「显示悬浮窗」的落地：显示 + 解最小化 + 聚焦。
+pub fn show_main(app: &AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window(MAIN_LABEL)
+        .ok_or_else(|| "找不到主窗口".to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    win.unminimize().ok();
+    win.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 调整主窗口尺寸（前端测量内容后上报，D4）。

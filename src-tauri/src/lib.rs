@@ -23,10 +23,15 @@ use tauri::{Emitter, Manager};
 const MOVE_PERSIST_THROTTLE: Duration = Duration::from_millis(500);
 
 pub fn run() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("tickerglass_lib=debug,info"),
-    )
-    .init();
+    // v0.4.1：生产构建默认 info——旧默认开着 debug，报价链路每 3s 打 ~15 行，
+    // 常驻进程白烧格式化与 I/O。要看调试日志用 RUST_LOG 覆盖。
+    let default_filter = if cfg!(debug_assertions) {
+        "tickerglass_lib=debug,info"
+    } else {
+        "info"
+    };
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter))
+        .init();
 
     let app_state = Arc::new(AppState::new());
 
@@ -39,6 +44,17 @@ pub fn run() {
     app_state.set_config(loaded.config);
 
     tauri::Builder::default()
+        // 单实例锁（v0.4.1）：必须注册在**第一个**。
+        // 旧版无锁：用户二次启动会得到一个抢不到 WebView2 数据目录的
+        // 无头残进程（实测 2026-11-18：两实例并存，第二个 30MB 无窗口），
+        // 还与第一个抢行情接口配额。现在二次启动只是把已有实例唤到前台。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window(window::MAIN_LABEL) {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
@@ -84,7 +100,8 @@ pub fn run() {
             }
             window::apply_window_config(&handle);
             register_move_handler(&handle);
-            window::register_close_to_hide(&handle);
+            window::register_window_guards(&handle);
+            window::spawn_minimize_watchdog(&handle);
             register_context_menu_handler(&handle);
             scheduler::spawn(handle);
             Ok(())
@@ -197,6 +214,14 @@ fn register_move_handler(app: &tauri::AppHandle) {
 
     win.on_window_event(move |event| {
         if let tauri::WindowEvent::Moved(pos) = event {
+            // v0.4.1：最小化停车坐标（≤-30000）既不钳制也不持久化——
+            // 旧版在钳制风暴里把它节流采样写进配置（用户的 config 里实测
+            // 留过 x=-100 的垃圾），下次启动窗口就出现在屏幕外。
+            let sf0 = handle.scale_factor().unwrap_or(1.0);
+            let lp = pos.to_logical::<f64>(sf0);
+            if lp.x <= -30000.0 || lp.y <= -30000.0 {
+                return;
+            }
             // 钳制在 Moved 里做：拖动结束时回弹，不在拖动中干扰手感
             let clamped = window::clamp_window_position(&handle);
             {
@@ -210,11 +235,7 @@ fn register_move_handler(app: &tauri::AppHandle) {
             }
             let (x, y) = match clamped {
                 Some((cx, cy)) => (cx as i32, cy as i32),
-                None => {
-                    let sf = handle.scale_factor().unwrap_or(1.0);
-                    let lp = pos.to_logical::<f64>(sf);
-                    (lp.x as i32, lp.y as i32)
-                }
+                None => (lp.x as i32, lp.y as i32),
             };
             window::persist_position(&state, x, y);
         }
