@@ -122,11 +122,12 @@ export async function resizeMainWindow(
 }
 
 /**
- * 拉大盘面板数据（A 股）。**一次调用会打 4 个请求**（1 指数 + 3 市场）。
+ * 拉大盘面板数据（A 股）。v0.4.0 起走 `push2delay`（分钟级延迟）：
+ * 进程内首次调用 2+3 个请求（腾讯指数 + 三市场一次取齐），
+ * 稳态每轮 2 个（指数 + 轮转一个市场，3 分钟全周期）。
  *
- * ⚠️ 别做快速轮询：数据源 `push2.eastmoney.com` 会静默限流
- * （整个 host 返回空响应体，且不是等固定时长就恢复）。
- * 刷新间隔见 `MarketApp` 里的 `REFRESH_MS`。
+ * 刷新间隔见 `MarketApp` 里的 `REFRESH_MS`（60s，别调小 ——
+ * delay 域宽容不等于无限，轮转节奏按它设计）。
  */
 export async function fetchMarketOverview(): Promise<MarketOverview> {
   return invoke<MarketOverview>("fetch_market_overview");

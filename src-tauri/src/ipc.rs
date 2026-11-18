@@ -660,14 +660,38 @@ async fn fetch_chart_inner(
 
     match period.as_str() {
         "intraday" => {
-            let bytes = fetcher
-                .fetch_tencent_minute(&code)
-                .await
-                .map_err(|e| format!("当日分时请求失败: {e}"))?;
-            let text = crate::parse::gbk::decode_gbk(&bytes);
-            let series = tencent_minute::parse_minute(&text, &code)
-                .map_err(|e| format!("当日分时解析失败: {e:?}"))?;
-            Ok(ChartPayload::Intraday { series })
+            // v0.4.0：优先走内存快照 —— scheduler 已把曲线维护在 state 里
+            // （盘中 ≤60s 新鲜；限流冷却期间是旧值，但那正是不该再打网络的时候）。
+            // 大图窗反复切 tab / 重开不再每次全量请求（需求 1 的"绘制不用全部请求"）。
+            let from_snapshot: Option<crate::model::MinuteSeries> = {
+                let snap = state.get();
+                snap.rows
+                    .iter()
+                    .find(|r| r.code.eq_ignore_ascii_case(&code))
+                    .and_then(|r| r.minute.clone())
+            };
+            if let Some(series) = from_snapshot {
+                return Ok(ChartPayload::Intraday { series });
+            }
+            // 快照里没有（刚添加 / 启动初期）：网络 → 失败退当日磁盘缓存
+            let fetched = match fetcher.fetch_tencent_minute(&code).await {
+                Ok(bytes) => {
+                    let text = crate::parse::gbk::decode_gbk(&bytes);
+                    tencent_minute::parse_minute(&text, &code)
+                        .map_err(|e| format!("当日分时解析失败: {e:?}"))
+                }
+                Err(e) => Err(format!("当日分时请求失败: {e}")),
+            };
+            match fetched {
+                Ok(series) => Ok(ChartPayload::Intraday { series }),
+                Err(err) => match crate::minute_cache::load_series(&code) {
+                    Some(series) => {
+                        log::warn!("[大图] {code} 网络失败（{err}），用当日缓存绘制");
+                        Ok(ChartPayload::Intraday { series })
+                    }
+                    None => Err(err),
+                },
+            }
         }
         "5day" => {
             let market = item.market;
@@ -1022,17 +1046,9 @@ const INDEX_TENCENT_CODES: [&str; 4] = ["sh000001", "sz399001", "sz399006", "sh0
 ///
 /// # 为什么面板必须有缓存
 ///
-/// 东财对 `push2` 是**间隔型限流**：请求之间要有足够间隔，连发必败。
-/// 实测（详见 `harness/survey-market-panel.md`）：
-/// - 静默 90s 后打一个 → ✅；4s 后再打 → ❌；之后连打 5 次全 ❌
-/// - 改成 4 个请求间隔 12s → **仍然全败**（连指数那个都失败）
-///
-/// 即允许频率大约是**每分钟一个请求**量级。面板需要 4 个数据点
-/// （指数 + 沪深北三市场），一轮里全取回是不可能的。
-///
-/// 所以改成：**每轮只取一个数据点（轮转），其余用缓存**。
-/// 60s 刷新 → 4 分钟内所有数据点各更新一次。对"看大盘形势"这个用途足够，
-/// 而且从第二轮起界面就一直有内容，不会像原来那样整块空白。
+/// v0.4.0 起大盘走 `push2delay`（选型见 `net::fetch_em_market_stats`），
+/// 稳态每轮只取一个市场（轮转，3 分钟全周期），没轮到的市场读这里。
+/// 即使某轮失败，上一份成功值仍在 —— 面板不会整块空白。
 ///
 /// 用 `Mutex` 而不是放进 `AppState`：这是纯展示缓存，与配置/快照无关，
 /// 塞进 `AppState` 会让每 3 秒的悬浮窗刷新都带上这些无关字节。
@@ -1051,19 +1067,17 @@ struct MarketCache {
 
 /// 拉大盘面板数据（**A 股，用户 2026-08-27 决定暂不含美股**）。
 ///
-/// # 请求预算：4 个（1 指数 + 3 市场），**彼此间隔 12 秒**
+/// # v0.4.0 请求形状：稳态每轮 2 个（1 腾讯指数 + 1 轮转市场），首开 4 个
 ///
-/// 这个数字是硬约束不是随手定的。`push2.eastmoney.com` 会**静默限流**：
-/// 几分钟内数百请求后整个 host 返回**空响应体**（无状态码、无错误 JSON），
-/// 且恢复行为不是固定窗口 —— 实测 75s 时放行一个请求、随即连发又被立刻掐死
-/// （详见 `harness/survey-market-panel.md`）。
+/// - 指数走腾讯（实时，不占东财额度），每轮都取
+/// - 家数/资金流走东财 **push2delay**（分钟级延迟换来全量+稳定）：
+///   进程内首次调用一次取齐三市场，稳态每轮轮转一个（60s/轮 → 3 分钟全周期）
 ///
-/// 曾评估过的替代方案与它们的代价：
-/// - `clist` 全量枚举统计家数：**60 个请求**（`pz` 被静默截到 100）→ 几次刷新就把用户打进限流
-/// - 按 `f3` 降序二分找零点：13 个请求，但跨页排序在页边界处不严格单调（实测两处逆序）
-/// - 现方案 `f113/f114/f115`：**1 个请求/市场**，且是服务端同一时刻算出的，无跨请求误差
+/// 家数用 `f113/f114/f115`（1 个请求/市场，服务端同一时刻算出，无跨请求误差）。
+/// 曾评估过的全量枚举方案已否证：`clist` 分页要 60 个请求；按 `f3` 二分找零点
+/// 在页边界不严格单调（实测两处逆序）。详见 `harness/survey-market-panel.md`。
 ///
-/// 故调用方（前端）必须把刷新间隔设得足够大，别自作聪明去做快速轮询。
+/// 前端刷新间隔 60s 别调小 —— delay 域宽容不等于无限，轮转节奏是按它设计的。
 #[tauri::command]
 pub async fn fetch_market_overview() -> Result<MarketOverview, String> {
     fetch_market_overview_inner().await
@@ -1082,21 +1096,23 @@ pub async fn fetch_market_overview_inner() -> Result<MarketOverview, String> {
     let fetcher = Fetcher::new().map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
     let now = crate::scheduler::now_hms();
 
-    // ── 本轮只取一个数据点 ──
+    // ── 家数与资金流向的取数节奏（v0.4.0 定稿）──
     //
-    // 为什么不一次取全（这是本函数最重要的设计决定）：
-    // 东财对 push2 是间隔型限流，允许频率约**每分钟一个请求**。
-    // 曾试过"4 个请求各间隔 12 秒"，实测**仍然全败**（连指数那个都失败）。
-    // 所以一轮里取回 4 个数据点是不可能的，硬试只会让面板永远空白。
+    // 数据源已迁到 push2delay（见 `fetch_em_market_stats` 的选型说明）——
+    // 那是本项目美股分时 + 资金流稳定跑了几个月的域，不再有 push2 的
+    // host 级 TLS 掐断问题。节奏分两种：
     //
-    // 改成轮转：每轮取一个，其余读缓存。60s 刷新 → 4 分钟内全部更新一次。
-    // 对"看大盘形势"这个用途足够，且第二轮起界面就一直有内容。
+    // - **进程内首次调用**（三市场缓存全空）：一次性顺序取齐三个市场。
+    //   面板第一次打开就是完整的，不用对着"等待取数"看 3 分钟。
+    //   一次性 3 连发每次启动只发生一次，delay 域可承受。
+    // - **稳态**：每轮只取一个市场（轮转），60s/轮 → 3 分钟全周期。
+    //   对分钟级漂移的家数/资金流足够，负载也比首开模式低 2/3。
     //
-    // ⚠️ 曾试过并已否证的另一条路：用 `ulist.np` 多 secid 一次拿齐三市场。
-    // 实测 `ulist.np` 上 `f113/f114/f115` 全为 0、`f140/f141/f146/f147` 不存在，
-    // 而 `f144=1404888` 恰是深证成指点位 14048.88×100 —— 那些槽位在这条路径上是
-    // **行情字段**，不是家数与资金流向。同一字段号在两条路径含义不同，不可套用。
-    // 证据固化在 `tests/fixtures/em_ulist_no_breadth.json`。
+    // ⚠️ 已否证过的捷径（别再走）：`ulist.np` 多 secid 一次拿三市场 ——
+    // 实测 `ulist.np` 上 `f113/f114/f115` 全为 0，那些槽位在这条路径上是
+    // **行情字段**。同一字段号在两条路径含义不同，不可套用。
+    // 证据固化在 `tests/fixtures/em_ulist_no_breadth.json`（2026-11-18 在
+    // delay 域复测，结论不变）。
     let mut fetch_error: Option<String> = None;
 
     // ── 指数：每轮都取，走腾讯（不占东财额度）──
@@ -1141,31 +1157,40 @@ pub async fn fetch_market_overview_inner() -> Result<MarketOverview, String> {
         }
     }
 
-    // ── 家数与资金流向：每轮只取一个市场（轮转），走东财 ──
-    let cursor = {
+    // ── 家数与资金流向：首开取齐，稳态轮转（见上方节奏说明）──
+    let (targets, cursor): (Vec<(&str, &str)>, usize) = {
         let guard = MARKET_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-        guard.as_ref().map(|c| c.cursor).unwrap_or(0)
+        let cursor = guard.as_ref().map(|c| c.cursor).unwrap_or(0);
+        // 三市场缓存全空 = 进程内首次调用 → 一次取齐；否则只取轮到的那个
+        let first_call = guard.as_ref().map(|c| c.markets.is_empty()).unwrap_or(true);
+        if first_call {
+            (MARKET_SECIDS.to_vec(), cursor)
+        } else {
+            (vec![MARKET_SECIDS[cursor % MARKET_SECIDS.len()]], cursor)
+        }
     };
-    let (label, secid) = MARKET_SECIDS[cursor % MARKET_SECIDS.len()];
-    match fetcher.fetch_em_market_stats(secid).await {
-        Ok(bytes) => {
-            // push2 返回 UTF-8 JSON（不是 GBK）—— 与上面腾讯那条链路不同
-            let text = String::from_utf8_lossy(&bytes);
-            match parse_market_stats(&text) {
-                Ok(stats) => {
-                    let mut guard = MARKET_CACHE.lock().unwrap_or_else(|p| p.into_inner());
-                    let c = guard.get_or_insert_with(MarketCache::default);
-                    c.markets.insert(secid.to_string(), (stats, now.clone()));
-                }
-                Err(e) => {
-                    log::warn!("[大盘] {label} 解析失败: {e}");
-                    fetch_error = Some(format!("{label}: {e}"));
+
+    for (label, secid) in &targets {
+        match fetcher.fetch_em_market_stats(secid).await {
+            Ok(bytes) => {
+                // 东财 delay 域返回 UTF-8 JSON（不是 GBK）—— 与上面腾讯那条链路不同
+                let text = String::from_utf8_lossy(&bytes);
+                match parse_market_stats(&text) {
+                    Ok(stats) => {
+                        let mut guard = MARKET_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+                        let c = guard.get_or_insert_with(MarketCache::default);
+                        c.markets.insert(secid.to_string(), (stats, now.clone()));
+                    }
+                    Err(e) => {
+                        log::warn!("[大盘] {label} 解析失败: {e}");
+                        fetch_error = Some(format!("{label}: {e}"));
+                    }
                 }
             }
-        }
-        Err(e) => {
-            log::warn!("[大盘] {label} 请求失败: {e}");
-            fetch_error = Some(format!("{label}请求失败: {e}"));
+            Err(e) => {
+                log::warn!("[大盘] {label} 请求失败: {e}");
+                fetch_error = Some(format!("{label}请求失败: {e}"));
+            }
         }
     }
 
@@ -1208,7 +1233,7 @@ pub async fn fetch_market_overview_inner() -> Result<MarketOverview, String> {
                 // 尚未轮到 / 上次失败。说清"排队中"而不是让用户以为坏了
                 error: Some(match &fetch_error {
                     Some(e) if e.starts_with(label) => e.clone(),
-                    _ => "等待取数（每轮只取一个，约 4 分钟轮完一遍）".to_string(),
+                    _ => "等待取数（稳态轮转，约 3 分钟内轮到重试）".to_string(),
                 }),
                 fetched_at: None,
             }),

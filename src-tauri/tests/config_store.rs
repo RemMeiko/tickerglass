@@ -5,6 +5,12 @@
 //!    + 损坏原文另存 `.corrupt`
 //! 3. 备份也不可用时才回默认配置（Corrupted），且不把垃圾写进 `.bak`
 //!
+//! v0.4.0 追加（断电加固）：
+//!
+//! 4. 主文件**丢失**（NotFound，断电落在 remove→rename 窗口或元数据回滚）
+//!    时同样先试 `.bak`，能救就救 —— 不再直接当"首次启动"回默认配置
+//! 5. `write_atomic` 直接覆盖已存在的主文件（不先 remove），且不留 .tmp
+//!
 //! 走 `load_at`/`save_at`（可测版本，指定目录），不碰真实 %APPDATA%。
 
 use std::path::PathBuf;
@@ -138,6 +144,80 @@ fn heal_after_corruption_does_not_poison_backup() {
         .expect(".bak 必须始终是可解析的完好配置");
     // 恢复出来的 600519 是"上一份完好配置"，而不是 garbage 也不是默认四只
     assert_eq!(bak_cfg.watchlist[0].tencent_code, "sh600519");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- v0.4.0 断电加固 ----------
+
+/// 断电可以让主文件**整个丢失**（旧实现的 remove→rename 窗口、NTFS 元数据回滚）。
+/// 此时 .bak 里还有上一份完好配置 —— 必须救回，而不是当"首次启动"回默认。
+/// 这是用户实际遭遇过的场景（需求 3 的原话："只能使用默认参数，又要重新添加一轮"）。
+#[test]
+fn missing_main_recovers_from_backup() {
+    let dir = tmp_dir("missing");
+    save_at(&dir, &config_with_code("sh600519")).unwrap();
+    save_at(&dir, &config_with_code("sz002466")).unwrap(); // .bak ← 600519
+
+    // 模拟断电后主文件消失
+    std::fs::remove_file(dir.join("config.json")).unwrap();
+
+    let r = load_at(&dir);
+    assert!(
+        matches!(r.outcome, LoadOutcome::RecoveredFromBackup { .. }),
+        "主文件丢失 + 备份可用 → 必须走备份恢复，实际 {:?}",
+        r.outcome
+    );
+    // 自选股必须是从 .bak 救回的 600519，不是默认四只
+    assert_eq!(r.config.watchlist[0].tencent_code, "sh600519");
+    // 自愈：主文件已重建
+    assert!(dir.join("config.json").exists());
+    let healed: AppConfig =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
+            .expect("自愈后的主文件必须是合法配置");
+    assert_eq!(healed.watchlist[0].tencent_code, "sh600519");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 主文件与备份**都**丢失 → 才是真正的首次启动，走默认配置且不伪造 .bak
+/// （锁住 v0.4.0 新分支的回落侧：加了 NotFound 恢复不能误伤首次启动体验）。
+#[test]
+fn missing_main_without_backup_is_first_run() {
+    let dir = tmp_dir("missing-nobak");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let r = load_at(&dir);
+    assert_eq!(r.outcome, LoadOutcome::Current, "无主文件无备份 = 首次启动");
+    assert!(dir.join("config.json").exists(), "首次启动立即落盘");
+    assert!(!dir.join("config.json.bak").exists(), "不得伪造 .bak");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `write_atomic` 直接 rename 覆盖已存在的主文件（v0.4.0 去掉了先 remove），
+/// 覆盖后内容是新的、无 .tmp 残留 —— 与 `save_maintains_last_good_backup`
+/// 的二次 save 场景互补，这里再显式锁一遍文件系统最终状态。
+#[test]
+fn save_overwrites_existing_main_and_leaves_no_tmp() {
+    let dir = tmp_dir("overwrite");
+    save_at(&dir, &config_with_code("sh600519")).unwrap();
+    save_at(&dir, &config_with_code("sz002466")).unwrap();
+
+    let main: AppConfig =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap())
+            .expect("覆盖后的主文件必须可解析");
+    assert_eq!(main.watchlist[0].tencent_code, "sz002466", "第二次 save 必须生效");
+    // 注：write_atomic 的临时名是 with_extension("json.tmp")——对主文件是
+    // config.json.tmp，对 .bak（本身扩展名是 bak）是 config.json.json.tmp。
+    // 故这里按"目录里不许有任何 tmp 文件"断言，不逐个猜名字。
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "rename 完成后不得留临时文件: {leftovers:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

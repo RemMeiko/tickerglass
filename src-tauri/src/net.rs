@@ -13,15 +13,18 @@ const REFERER: &str = "https://quote.eastmoney.com/";
 ///
 /// Sprint 2A 补入两个**搜索**域名 —— 不补的话 `get_bytes` 会直接 `Blocked`，
 /// 标准 2 的搜索在运行时必挂（编译期看不出来）。
+///
+/// v0.4.0：`push2.eastmoney.com` 移出白名单 —— 大盘面板整体迁到 `push2delay`
+///（2026-11-18 盘中实测：delay 的 `stock/get` 同样带 f113/f114/f115 家数与
+/// f135~f149 资金流，沪 459/1836/60、恒等式成立；旧结论"只有 push2 带"是在
+/// 别的路径上得出的）。push2 域对轮询的容忍度极差（host 级 TLS 掐断惩罚），
+/// 不再保留任何请求路径走它。
 const ALLOWED_HOSTS: &[&str] = &[
     "qt.gtimg.cn",
     "web.ifzq.gtimg.cn",
     "push2delay.eastmoney.com",
     // 日K 主源（**不同于 push2delay**，是独立域名，漏加会被 get_bytes 硬拒）
     "push2his.eastmoney.com",
-    // 大盘面板（涨跌家数 + 资金流向）。与 push2delay/push2his 又是**第三个**独立域名，
-    // 且实测只有它带 f113/f114/f115 家数字段
-    "push2.eastmoney.com",
     // 搜索主源
     "searchapi.eastmoney.com",
     // 搜索兜底源
@@ -166,44 +169,6 @@ pub struct Fetcher {
     client: reqwest::Client,
 }
 
-// ───────────── push2 全局闸门（v0.3.0 新增） ─────────────
-
-/// `push2.eastmoney.com` 上一次**实际发出**请求的时刻。
-///
-/// # 为什么必须有这个闸门（2026-09-16 实测复盘）
-///
-/// v0.3.0 起有两条链路要打 push2：大盘面板（家数/资金流轮转）与
-/// ~~个股资金流~~（已改走 `push2delay`，不占本闸门）。当天实测：
-/// 间隔 ~90s 的两次请求都成功，但中间夹的第三次（紧跟在上一次后 ~90s 内）
-/// 返回**空响应体**，随后升级为 TLS 掐断 —— 惩罚是 host 级的且会被后续
-/// 请求延长。所以所有 push2 请求（不分路径）共用这把闸：距上次发出不足
-/// [`PUSH2_MIN_GAP`] 就**拒绝发送**（不打网络，不刷新计时器），
-/// 调用方按普通失败处理（大盘面板用缓存）。拒绝不消耗额度。
-static PUSH2_GATE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-/// push2 相邻两次请求的最小间隔。90s 实测安全、60s 实测会被掐，
-/// 取 65s 偏保守值 —— 宁可慢一点，也不把整个 host 打进 3 分钟惩罚。
-const PUSH2_MIN_GAP: Duration = Duration::from_secs(65);
-
-/// 尝试占用 push2 额度。`Ok` = 本轮可以发请求（已记账）；
-/// `Err` = 间隔未到，调用方跳过本轮。
-pub fn push2_acquire() -> Result<(), NetError> {
-    let mut last = PUSH2_GATE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let now = std::time::Instant::now();
-    if let Some(t) = *last {
-        if now.duration_since(t) < PUSH2_MIN_GAP {
-            return Err(NetError::Http(format!(
-                "push2 限流闸门：距上次请求不足 {}s，本轮跳过",
-                PUSH2_MIN_GAP.as_secs()
-            )));
-        }
-    }
-    *last = Some(now);
-    Ok(())
-}
-
 impl Fetcher {
     pub fn new() -> Result<Self, NetError> {
         let client = reqwest::Client::builder()
@@ -323,64 +288,29 @@ impl Fetcher {
     ///
     /// `secid` 传 `1.000001`（沪）/ `0.399001`（深）/ `0.899050`（北）。
     ///
-    /// # 为什么是 `push2` 而不是 `push2delay`
+    /// # v0.4.0：host 从 `push2` 迁到 `push2delay`
     ///
-    /// 实测只有 `push2.eastmoney.com` 带 `f113/f114/f115`（涨/跌/平家数）。
-    /// 这是本项目用到的**第三个** eastmoney 域名，白名单漏加会被硬拒。
+    /// 2026-11-18 盘中实测推翻了"只有 push2 带 f113/f114/f115"的旧结论：
+    /// delay 的 `stock/get` 同样带全部字段（沪 459/1836/60=2355 家、
+    /// f135~f149 五档齐全、恒等式成立），代价是数据有分钟级延迟。
+    /// 而 push2 域对轮询的容忍度极差（host 级 TLS 掐断惩罚，v0.3.0 实测），
+    /// 大盘面板长期因它缺市场 —— 换域后三市场 3 分钟内必全。
     ///
-    /// # ⚠️ 这个 host 会静默限流
+    /// # ⚠️ 仍要把"空响应"当限流
     ///
-    /// 实测 2026-08-27：几分钟内数百请求后，**整个 host** 返回**空响应体** ——
-    /// 没有 HTTP 错误码、没有错误 JSON、没有 `rc` 字段，恢复约需 3 分钟。
-    /// 故调用方必须把"空响应"当成一种**明确的限流状态**，
-    /// 绝不能当成"家数为 0"（那会在界面上显示彻底虚假的数据）。
+    /// push2 曾实测几分钟内数百请求后整个 host 返回**空响应体**（无错误码）。
+    /// delay 域宽容得多（美股分时 + 资金流已在上面跑了几个月），
+    /// 但调用方仍须把"空响应"当**明确的限流状态**处理（parse 层的
+    /// `MarketParseError::RateLimited`），绝不能当成"家数为 0"。
     pub async fn fetch_em_market_stats(&self, secid: &str) -> Result<Vec<u8>, NetError> {
-        push2_acquire()?;
-        // 一次请求同时取家数与五档资金流向，省一半请求（限流约束下很重要）
+        // 一次请求同时取家数与五档资金流向，省一半请求
         let fields = "f57,f58,f43,f170,f113,f114,f115,\
                       f135,f136,f137,f138,f139,f140,\
                       f141,f142,f143,f144,f145,f146,f147,f148,f149";
-        let url =
-            format!("https://push2.eastmoney.com/api/qt/stock/get?secid={secid}&fields={fields}");
-        self.get_bytes(&url).await
-    }
-
-    /// 大盘面板：**一个请求**拿三个市场的家数 + 资金流向（`ulist.np` 多 secid）。
-    ///
-    /// # 为什么要有这条（与 [`Self::fetch_em_market_stats`] 并存）
-    ///
-    /// 东财的限流是**按路径独立计数**的，不是 host 级 —— 实测同一次运行、
-    /// 同一个客户端、相隔 6 秒：`stock/get` 三次全被掐断 TLS，
-    /// 而 `ulist.np/get` 返回 HTTP 200（详见 `harness/survey-market-panel.md`）。
-    ///
-    /// 面板原先的形状是 1×`ulist.np` + 3×`stock/get`，即在**同一条路径上连打 3 次**，
-    /// 最容易触发。改成一次 `ulist.np` 带 3 个 secid 后，
-    /// 该路径的请求数从 3 降到 1，且完全不碰 `stock/get`。
-    ///
-    /// ⚠️ **`ulist.np` 是否真的带 `f113/f114/f115` 与 `f135`~`f149` 尚未验证** ——
-    /// 我正要验时把这条路径也打进限流了。所以调用方必须做降级：
-    /// 若解析不出家数就退回逐市场的 `stock/get`。
-    /// 这样无论这个未验证前提成立与否都不会比现状更差。
-    pub async fn fetch_em_markets_batch(&self, secids: &[&str]) -> Result<Vec<u8>, NetError> {
-        push2_acquire()?;
-        // f12/f14 是代码与名称，其余同 fetch_em_market_stats
-        let fields = "f12,f14,f113,f114,f115,\
-                      f135,f136,f137,f138,f139,f140,\
-                      f141,f142,f143,f144,f145,f146,f147,f148,f149";
         let url = format!(
-            "https://push2.eastmoney.com/api/qt/ulist.np/get?secids={}&fields={fields}",
-            secids.join(",")
+            "https://push2delay.eastmoney.com/api/qt/stock/get?secid={secid}&fields={fields}"
         );
         self.get_bytes(&url).await
-    }
-
-    /// 大盘面板：三大指数快照（一个请求）。
-    pub async fn fetch_em_indices(&self) -> Result<Vec<u8>, NetError> {
-        push2_acquire()?;
-        let url = "https://push2.eastmoney.com/api/qt/ulist.np/get\
-                   ?secids=1.000001,0.399001,0.399006\
-                   &fields=f1,f2,f3,f4,f6,f12,f14";
-        self.get_bytes(url).await
     }
 
     /// 个股当日资金流（v0.3.0 需求 6）：**一个请求**带整批 secid。

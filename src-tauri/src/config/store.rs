@@ -13,6 +13,18 @@
 //   （自愈），损坏原文另存 `.corrupt` 留排查。用户除了看到一条可关掉的提示，
 //   自选股与设置原样都在 —— 这就是"感受不到"。
 // - .bak 也坏/不存在 → 仍旧回默认配置（与旧行为一致，这是能做的全部）。
+//
+// # v0.4.0 断电加固（需求 3）—— 用户实际遭遇过异常关机丢配置
+//
+// v0.3.0 的备份机制有两处窗口会在断电时失效（用户配置目录里真的出现过
+// `config.json.corrupt`）：
+//
+// 1. **写入没有 fsync**。`fs::write` 只到 OS 缓存；断电时 rename（元数据）
+//    可能已落盘而数据没有，留下 0 字节或半截文件 —— 损坏就是这么来的。
+//    现在 [`write_atomic`] 在 rename 前 `sync_all`，字节真正到达磁盘才换名。
+// 2. **"文件不存在"不尝试 .bak**。旧逻辑把 NotFound 当"首次启动"回默认配置，
+//    但断电也可能造成文件丢失（旧实现先 remove 后 rename 的中间窗口、
+//    或文件系统元数据回滚）。现在 NotFound 同样先试 .bak，能救就救+自愈。
 
 use super::migrate::{migrate, LoadOutcome, MigrationResult};
 use super::schema::AppConfig;
@@ -72,7 +84,16 @@ pub fn load_at(dir: &Path) -> MigrationResult {
     let raw = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::info!("[配置] 首次启动，使用默认配置：{}", path.display());
+            // v0.4.0：NotFound 不再直接当"首次启动"。断电也可能让主文件整个丢失
+            // （旧 write_atomic 的 remove→rename 中间窗口、NTFS 元数据回滚），
+            // 此时 .bak 里往往还有上一份完好配置 —— 不看它就回默认，
+            // 用户的自选股就全没了（用户实际遭遇过的场景）。
+            if let Some(healed) =
+                recover_from_backup(dir, "主文件丢失（疑似异常关机落在写入窗口）")
+            {
+                return healed;
+            }
+            log::info!("[配置] 首次启动（无主文件亦无可用备份），使用默认配置：{}", path.display());
             let config = AppConfig::default();
             // 首次启动立即落盘，让用户能看到并手改这个文件
             if let Err(e) = save_at(dir, &config) {
@@ -107,35 +128,8 @@ pub fn load_at(dir: &Path) -> MigrationResult {
             Err(e) => log::error!("[配置] 损坏原文另存失败: {e}"),
         }
 
-        match std::fs::read_to_string(dir.join(BACKUP_FILE)) {
-            Ok(bak_raw) => {
-                let bak = migrate(&bak_raw);
-                if matches!(bak.outcome, LoadOutcome::Corrupted { .. }) {
-                    log::error!("[配置] 备份文件同样损坏，恢复默认配置");
-                    // 走原有的损坏路径：默认配置 + 写回固化
-                } else {
-                    log::warn!(
-                        "[配置] 已从 {} 恢复（备份版本态 {:?}），自选股与设置保留",
-                        BACKUP_FILE,
-                        bak.outcome
-                    );
-                    let healed = MigrationResult {
-                        config: bak.config,
-                        outcome: LoadOutcome::RecoveredFromBackup {
-                            reason: reason.clone(),
-                        },
-                    };
-                    // 自愈：把恢复结果写回主文件。save_at 只会备份"可解析的"主文件，
-                    // 而此刻主文件是损坏的 → 不会把垃圾写进 .bak，安全。
-                    if let Err(e) = save_at(dir, &healed.config) {
-                        log::error!("[配置] 自愈写回失败: {e}");
-                    }
-                    return healed;
-                }
-            }
-            Err(e) => {
-                log::error!("[配置] 备份不可读，恢复默认配置: {e}");
-            }
+        if let Some(healed) = recover_from_backup(dir, reason) {
+            return healed;
         }
     }
 
@@ -155,6 +149,36 @@ pub fn load_at(dir: &Path) -> MigrationResult {
     }
 
     result
+}
+
+/// 尝试从 `.bak` 恢复（v0.4.0 抽出的共用路径，主文件损坏与丢失都走这里）。
+///
+/// 返回 `Some(healed)` = 备份可用，已构造 RecoveredFromBackup 结果并自愈写回主文件；
+/// `None` = 备份不存在/同样损坏，调用方回落默认配置。
+fn recover_from_backup(dir: &Path, reason: &str) -> Option<MigrationResult> {
+    let bak_raw = std::fs::read_to_string(dir.join(BACKUP_FILE)).ok()?;
+    let bak = migrate(&bak_raw);
+    if matches!(bak.outcome, LoadOutcome::Corrupted { .. }) {
+        log::error!("[配置] 备份文件同样损坏，恢复默认配置");
+        return None;
+    }
+    log::warn!(
+        "[配置] 已从 {} 恢复（备份版本态 {:?}，原因：{reason}），自选股与设置保留",
+        BACKUP_FILE,
+        bak.outcome
+    );
+    let healed = MigrationResult {
+        config: bak.config,
+        outcome: LoadOutcome::RecoveredFromBackup {
+            reason: reason.to_string(),
+        },
+    };
+    // 自愈：把恢复结果写回主文件。save_at 只会备份"可解析的"主文件，
+    // 而此刻主文件是损坏/丢失的 → 不会把垃圾写进 .bak，安全。
+    if let Err(e) = save_at(dir, &healed.config) {
+        log::error!("[配置] 自愈写回失败: {e}");
+    }
+    Some(healed)
 }
 
 /// 原子写：先写同目录临时文件再 `rename`，避免写入过程中崩溃留下半截文件。
@@ -192,14 +216,22 @@ pub fn save_at(dir: &Path, config: &AppConfig) -> Result<(), String> {
     write_atomic(&path, json.as_bytes())
 }
 
+/// 原子写。v0.4.0 两处断电加固（见模块文档的 v0.4.0 一节）：
+///
+/// 1. **`sync_all` 后才 rename** —— `fs::write` 只到 OS 缓存，断电时 rename
+///    可能已落盘而数据没有，留下 0 字节/半截主文件。sync 把字节真正推到磁盘。
+/// 2. **不再"先删旧文件再改名"** —— `std::fs::rename` 在 Windows 上对已存在的
+///    目标文件走 `MoveFileEx(REPLACE_EXISTING)` 直接覆盖（本函数被
+///    `save_maintains_last_good_backup` 等测试在覆盖场景下反复验证）。
+///    旧实现的"先 remove 后 rename"中间若断电，主文件直接消失。
+///    现在即使真出现文件丢失，加载侧还有 .bak 恢复兜底（`load_at` 的 NotFound 分支）。
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("写临时文件失败: {e}"))?;
-    // Windows 上 rename 到已存在的文件会失败，故先删旧文件。
-    // 这中间的窗口里若崩溃，.tmp 仍在，下次启动会走"文件不存在→默认配置"，
-    // 比留下半截 config.json 好（后者会被判损坏并触发备份恢复）。
-    if path.exists() {
-        std::fs::remove_file(path).map_err(|e| format!("删除旧配置失败: {e}"))?;
+    {
+        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("写临时文件失败: {e}"))?;
+        f.write_all(bytes).map_err(|e| format!("写临时文件失败: {e}"))?;
+        f.sync_all().map_err(|e| format!("刷盘失败: {e}"))?;
     }
     std::fs::rename(&tmp, path).map_err(|e| format!("重命名临时文件失败: {e}"))
 }

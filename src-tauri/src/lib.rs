@@ -2,6 +2,7 @@ pub mod backoff;
 pub mod config;
 pub mod domain;
 pub mod ipc;
+pub mod minute_cache;
 pub mod model;
 pub mod net;
 pub mod parse;

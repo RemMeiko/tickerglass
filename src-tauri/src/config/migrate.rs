@@ -62,9 +62,9 @@ impl LoadOutcome {
                     .to_string(),
             ),
             LoadOutcome::RecoveredFromBackup { .. } => Some(
-                "配置文件异常，已自动从备份恢复，自选股与设置均已保留\
-                 （损坏原文保留为 config.json.corrupt）"
-                    .to_string(),
+                // v0.4.0 起不再提 .corrupt：主文件**丢失**（非损坏）的恢复路径
+                // 没有原文可留，文案统一说"已从备份恢复"即可
+                "配置文件异常，已自动从备份恢复，自选股与设置均已保留".to_string(),
             ),
         }
     }

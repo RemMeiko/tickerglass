@@ -309,14 +309,17 @@ pub fn sum_main_force_net(list: &[MoneyFlow]) -> f64 {
 /// # 与 [`parse_market_stats`] 的关系
 ///
 /// 两者取的是同一批字段，只是报文外层结构不同（`ulist.np` 多一层 `diff` 数组）。
-/// 存在两条路的理由是**限流按路径独立计数**：`ulist.np` 一个请求能拿齐三个市场，
-/// 而 `stock/get` 要打三次（详见 `net::fetch_em_markets_batch`）。
+///
+/// ⚠️ v0.4.0 起此解析器**无生产调用方**（对应的批量 fetcher 已随 push2 退役删除）。
+/// 留下来的原因：`ulist.np` 通道已被**两次实测否证**（2026-08 push2 域与
+/// 2026-11-18 delay 域，`f113/f114/f115` 均为 0，槽位是行情字段）——
+/// 证据在 `tests/fixtures/em_ulist_no_breadth.json`。谁想再试多 secid 批量，
+/// 先读那个 fixture，别重蹈覆辙。
 ///
 /// # 返回空 Vec 而不是报错的情形
 ///
-/// `ulist.np` 是否携带 `f113/f114/f115` **尚未在真机验证**。若它不带，
-/// 这里会返回空 `Vec`（而不是 `Err`），调用方据此**降级**到逐市场的
-/// `stock/get`。做成"空"而不是"错"，是因为这不是故障 —— 是这条通道不提供该字段，
+/// 若响应不带家数字段，这里返回空 `Vec`（而不是 `Err`），调用方据此降级。
+/// 做成"空"而不是"错"，是因为这不是故障 —— 是这条通道不提供该字段，
 /// 属于预期内的分支。
 pub fn parse_markets_batch(text: &str) -> Result<Vec<(String, MarketStats)>, MarketParseError> {
     let data = data_of(text)?;

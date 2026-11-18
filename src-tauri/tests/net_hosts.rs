@@ -32,7 +32,7 @@ fn sprint1_quote_hosts_remain_whitelisted() {
 }
 
 #[test]
-fn whitelist_has_exactly_seven_hosts() {
+fn whitelist_has_exactly_six_hosts() {
     // 锁总数：新增外联域名必须是显式决策，不能悄悄溜进来。
     //
     // 变更记录（改这个数字前请先在此登记理由）：
@@ -42,24 +42,28 @@ fn whitelist_has_exactly_seven_hosts() {
     //   且腾讯日K 不带成交量，画不了量柱）。
     //   同步已补 `spec.md` 标准 21 的隐私域名清单，否则 Sprint 3 会误判有未声明外联。
     // - 6 → 7（2026-08-27）：新增 `push2.eastmoney.com` 作大盘面板源。
-    //   这是**第三个** eastmoney 域名（前两个是 push2delay / push2his）。
-    //   非它不可的理由：实测只有它带 `f113/f114/f115`（涨/跌/平家数），
-    //   push2delay 上这三个字段不存在，而按记忆试的 `f104/f105/f106` 返回 0/0/100。
-    //   同一请求还能带回资金流向五档（f135~f149），省掉一半请求 ——
-    //   这在该 host 会静默限流的前提下很关键（详见 harness/survey-market-panel.md）。
-    assert_eq!(allowed_hosts().len(), 7, "实际: {:?}", allowed_hosts());
+    //   非它不可的理由：当时实测"只有它带 f113/f114/f115"。
+    // - 7 → 6（2026-11-18，v0.4.0）：**移除** `push2.eastmoney.com`。
+    //   当天的旧结论被盘中实测推翻：push2delay 的 `stock/get` 同样带
+    //   f113/f114/f115 与 f135~f149（沪 459/1836/60、恒等式成立），
+    //   大盘面板整体迁 delay 域。push2 对轮询的 host 级 TLS 掐断惩罚
+    //   使它不再值得留在请求路径里（详见 net::fetch_em_market_stats 文档）。
+    assert_eq!(allowed_hosts().len(), 6, "实际: {:?}", allowed_hosts());
 }
 
 #[test]
 fn market_panel_host_is_whitelisted() {
+    // v0.4.0：大盘面板（家数/资金流）与美股分时、个股资金流同走 push2delay。
     // 漏加会让大盘面板被 get_bytes 硬拒，且编译期完全看不出来
     assert!(
-        is_allowed_host("push2.eastmoney.com"),
+        is_allowed_host("push2delay.eastmoney.com"),
         "大盘面板源不在白名单 → 面板不可用"
     );
-    // 三个 eastmoney 域名互不等价，别混为一谈
-    assert_ne!("push2.eastmoney.com", "push2delay.eastmoney.com");
-    assert_ne!("push2.eastmoney.com", "push2his.eastmoney.com");
+    // push2（非 delay）已随 v0.4.0 退役，不得再悄悄溜回白名单
+    assert!(
+        !is_allowed_host("push2.eastmoney.com"),
+        "push2 已退役，出现即说明有人把它接回了请求路径（需重新评审）"
+    );
 }
 
 #[test]

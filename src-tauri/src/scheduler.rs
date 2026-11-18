@@ -1,5 +1,6 @@
 use crate::backoff::Backoff;
 use crate::domain::market::Market;
+use crate::minute_cache;
 use crate::model::{
     DataState, MinuteSeries, Quote, QuoteParseOutcome, RowSnapshot, Snapshot, WatchItem,
 };
@@ -16,28 +17,85 @@ use tauri::{AppHandle, Emitter, Manager};
 // `config::RefreshConfig`，用户可在设置页调整，两条轮询链路每轮比对配置、
 // 变了就重建 tokio interval。
 //
-// 关于间隔的两条约束仍然成立，改动时必读：
-//
 // ① 报价走腾讯**批量**接口（一次拿全部自选股），所以间隔与自选股数量无关。
 //    2s 是实测安全下限（QUOTE_SECS_MIN）。
 //
 // ② 分时是**每个标的一个请求**，间隔要乘以标的数量才是真实请求速率。
-//    所以它的下限（MINUTE_SECS_MIN=3）比报价高，且美股另有降频 ——
-//    见下方 US_MINUTE_EVERY_N_TICKS。
+//    v0.4.0 起分时链路从"每 tick 全量拉所有标的"改为**按需调度**：
+//    每标的有新鲜度目标（[`MINUTE_TARGET_SECS`] 等），到期才发请求，
+//    每 tick 最多 [`MINUTE_MAX_PER_TICK`] 只，连续失败整链路冷却退避
+//    （[`minute_cooldown_secs`]），当日数据另有磁盘缓存（`minute_cache`）。
+//    旧形状在 9 只自选股 × 5s tick 下是 ~108 请求/分钟打
+//    `web.ifzq.gtimg.cn` 且 24 小时不间断 —— 用户实测挂一段时间后
+//    被上游以 HTTP 501 拒绝，失败后仍按原速率硬打，恶性循环。
 
-/// 美股分时的降频倍数：每 N 个分时 tick 才取一次美股。
+/// 每 tick 最多取多少只标的的分时。预算上限 —— 自选股再多时把请求摊开，
+/// 而不是一 tick 内打爆上游。
+const MINUTE_MAX_PER_TICK: usize = 3;
+/// 盘中分时新鲜度目标（秒）。分时数据本身是分钟粒度，60s 已是"实时"。
+const MINUTE_TARGET_SECS: u64 = 60;
+/// 美股分时目标（秒）。走 push2delay（与旧版 US_MINUTE_EVERY_N_TICKS=6
+/// 在默认 5s tick 下的实际节奏一致：30s/只）。
+const US_MINUTE_TARGET_SECS: u64 = 30;
+/// 休市时的目标（秒）。数据不再变化，30 分钟确认一次足够 ——
+/// 这同时消灭了旧版"夜里也每 5 秒全量轮询静态数据"的浪费（501 主因之一）。
+const IDLE_MINUTE_TARGET_SECS: u64 = 1800;
+
+/// 腾讯分时（A股/指数/港股共用 `web.ifzq.gtimg.cn`）失败冷却表：
+/// 第 n 轮连续失败 → 冷却 60→120→240→480→600（封顶）秒。
 ///
-/// **这条是限流保护，不是性能优化，不要跟着 minute_secs 一起放开。**
-/// 美股分时走东财 `trends2`（腾讯对美股只返 1 个点，画不出线），
-/// 而东财是**间隔型限流且按路径独立计数** —— 约每分钟只容一个请求，
-/// 连发必败，且探测行为本身会刷新它的计时器。
+/// 冷却期间**整条腾讯分时链路不发请求**（美股走 push2delay 不受影响），
+/// 曲线用内存/磁盘缓存的旧值。任何一次成功即清零。
+/// 这是 v0.4.0 对"HTTP 501 后仍按原速率硬打、惩罚被越打越长"的纠正 ——
+/// 上游的惩罚靠静默等它过期，继续请求只会延长它。
+pub fn minute_cooldown_secs(consecutive_failures: u32) -> u64 {
+    if consecutive_failures == 0 {
+        return 0;
+    }
+    let shift = (consecutive_failures - 1).min(4);
+    (60u64).saturating_mul(1u64 << shift).min(600)
+}
+
+/// 本 tick 要取哪些标的的分时（**纯函数**，调度策略的可测核心）。
 ///
-/// 它是**倍数**而不是绝对秒数，所以用户把 minute_secs 调小时美股同步变慢：
-/// minute_secs=5 → 美股 30s，minute_secs=3 → 美股 18s。
-/// 即使用户设到下限 3s，美股仍是 18s 一次（约 3.3 请求/分钟）——
-/// 仍高于东财的容忍线，但远好过不降频的 20 请求/分钟。
-/// 若哪天报"美股曲线没了"，先查这里是不是被放开了。
-const US_MINUTE_EVERY_N_TICKS: u64 = 6;
+/// 返回选中的下标（按传入顺序），最多 [`MINUTE_MAX_PER_TICK`] 个：
+/// - `ages[i] = None`（本会话从未成功）→ 立即到期；
+/// - `ages[i] = Some(距上次成功时长)` ≥ 新鲜度目标 → 到期。
+///   目标按市场与交易时段分档：美股盘中 30s、其余盘中 60s、休市一律 30 分钟。
+/// - `tencent_cooldown`（腾讯分时域失败冷却中）时跳过所有非美股标的。
+pub fn plan_minute_batch(
+    items: &[WatchItem],
+    ages: &[Option<Duration>],
+    in_session: &[bool],
+    tencent_cooldown: bool,
+) -> Vec<usize> {
+    let mut picked: Vec<usize> = Vec::with_capacity(MINUTE_MAX_PER_TICK);
+    for (i, item) in items.iter().enumerate() {
+        if picked.len() >= MINUTE_MAX_PER_TICK {
+            break;
+        }
+        // 冷却只针对腾讯分时域（web.ifzq.gtimg.cn）；美股走 push2delay，独立限流域
+        if tencent_cooldown && item.market != Market::Us {
+            continue;
+        }
+        let target = if in_session.get(i).copied().unwrap_or(false) {
+            match item.market {
+                Market::Us => US_MINUTE_TARGET_SECS,
+                _ => MINUTE_TARGET_SECS,
+            }
+        } else {
+            IDLE_MINUTE_TARGET_SECS
+        };
+        let due = match ages.get(i).and_then(|a| *a) {
+            None => true,
+            Some(age) => age.as_secs() >= target,
+        };
+        if due {
+            picked.push(i);
+        }
+    }
+    picked
+}
 
 /// 本地时间 `HH:MM:SS`。大盘面板（`ipc::fetch_market_overview`）也用它，
 /// 故为 `pub` —— 两处各写一份格式串会导致时间显示风格不一致。
@@ -130,6 +188,8 @@ pub fn spawn(app: AppHandle) {
     // 数据源改读配置快照（D1）：不再直读 watchlist.rs 常量
     let items = state.config().watchlist;
     state.set(initial_snapshot(&items));
+    // v0.4.0：预载当日分时缓存 —— 曲线随首屏立即可见，零网络请求
+    preload_minute_cache(&state);
 
     let fetcher = match Fetcher::new() {
         Ok(f) => f,
@@ -194,7 +254,7 @@ pub fn spawn(app: AppHandle) {
         });
     }
 
-    // 分时轮询：间隔由 config.refresh.minute_secs 决定（用户可在设置页改），首轮立即执行
+    // 分时轮询（v0.4.0 按需调度：见文件头 ② 与 plan_minute_batch 的文档）
     {
         let app = app.clone();
         let state = state.clone();
@@ -205,16 +265,21 @@ pub fn spawn(app: AppHandle) {
             let mut cur_secs = state.config().refresh.minute_secs;
             let mut tick = tokio::time::interval(Duration::from_secs(cur_secs));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            // 首轮失败的空等代价比报价更大，同样走快速退避。
-            // 这条链路在独立任务里，退避耗时不阻塞报价链路的首屏。
             let mut first_paint_done = false;
-            // 分时 tick 计数，用于给美股降频（见 US_MINUTE_EVERY_N_TICKS）
-            let mut ticks: u64 = 0;
+            // ── v0.4.0 调度状态 ──
+            // 每标的上次成功时刻（键 = 小写腾讯代码）。"到期"判定见 plan_minute_batch。
+            let mut last_ok: HashMap<String, std::time::Instant> = HashMap::new();
+            // 每标的上次写缓存的点数 —— 点数没变就不重写盘（盘中每分钟至多一次）
+            let mut cached_points: HashMap<String, usize> = HashMap::new();
+            // 腾讯分时域失败冷却（见 minute_cooldown_secs）
+            let mut cooldown_until: Option<std::time::Instant> = None;
+            let mut consecutive_failures: u32 = 0;
+
             loop {
                 tokio::select! {
                     _ = tick.tick() => {}
                     _ = CONFIG_CHANGED.notified() => {
-                        log::debug!("[分时] 配置变更 → 立即刷新");
+                        log::debug!("[分时] 配置变更 → 立即评估");
                     }
                 }
 
@@ -228,20 +293,69 @@ pub fn spawn(app: AppHandle) {
                     tick = tokio::time::interval(Duration::from_secs(cur_secs));
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 }
+
+                let items = state.config().watchlist;
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let in_session: Vec<bool> = items
+                    .iter()
+                    .map(|it| crate::domain::trading_session::in_session(it.market, now_ms))
+                    .collect();
+                let cooling = cooldown_until
+                    .map(|t| std::time::Instant::now() < t)
+                    .unwrap_or(false);
+                let ages: Vec<Option<Duration>> = items
+                    .iter()
+                    .map(|it| {
+                        last_ok
+                            .get(&it.tencent_code.to_ascii_lowercase())
+                            .map(|t| t.elapsed())
+                    })
+                    .collect();
+                let batch = plan_minute_batch(&items, &ages, &in_session, cooling);
+                if batch.is_empty() {
+                    // 没有到期标的：本轮零请求（全部新鲜 / 休市宽限 / 冷却中）
+                    continue;
+                }
+                let selected: Vec<WatchItem> =
+                    batch.iter().map(|&i| items[i].clone()).collect();
+                if log::log_enabled!(log::Level::Debug) {
+                    let codes: Vec<&str> =
+                        selected.iter().map(|i| i.tencent_code.as_str()).collect();
+                    log::debug!("[分时] 本轮取 {} 只: {}", codes.len(), codes.join(","));
+                }
                 let policy = if first_paint_done {
                     Backoff::none()
                 } else {
                     Backoff::fast()
                 };
-                // 首轮必须带上美股，否则美股要等 30s 才出现第一条曲线。
-                // 之后每 N 轮带一次。
-                let include_us = !first_paint_done || ticks % US_MINUTE_EVERY_N_TICKS == 0;
-                let items = state.config().watchlist;
-                if refresh_minutes(&fetcher, &state, &items, policy, include_us).await {
+                let outcome = refresh_minutes(&fetcher, &state, &selected, policy, |code, series| {
+                    // 成功记账 + 点数变了才写当日缓存
+                    let k = code.to_ascii_lowercase();
+                    last_ok.insert(k.clone(), std::time::Instant::now());
+                    if cached_points.get(&k) != Some(&series.points.len()) {
+                        minute_cache::save_series(series);
+                        cached_points.insert(k, series.points.len());
+                    }
+                })
+                .await;
+                if outcome.any_ok {
                     first_paint_done = true;
                 }
+                // 冷却记账：只统计腾讯域（美股走 push2delay，独立限流域，不连坐）
+                if outcome.tencent_fail > 0 && outcome.tencent_ok == 0 {
+                    consecutive_failures += 1;
+                    let secs = minute_cooldown_secs(consecutive_failures);
+                    cooldown_until =
+                        Some(std::time::Instant::now() + Duration::from_secs(secs));
+                    log::warn!(
+                        "[分时] 腾讯域连续第 {consecutive_failures} 轮失败 → 冷却 {secs}s\
+                         （期间不发请求，曲线用已缓存数据）"
+                    );
+                } else if outcome.tencent_ok > 0 {
+                    consecutive_failures = 0;
+                    cooldown_until = None;
+                }
                 emit_snapshot(&app, &state);
-                ticks = ticks.wrapping_add(1);
             }
         });
     }
@@ -514,32 +628,36 @@ fn mark_stale(row: &mut RowSnapshot, message: &str) {
     }
 }
 
+/// 一轮分时批量刷新的结果汇总（调度方据此更新首屏状态与冷却计数）。
+#[derive(Debug, Default)]
+struct MinuteBatchOutcome {
+    any_ok: bool,
+    /// 腾讯域（web.ifzq.gtimg.cn：A股/指数/港股）成功数 —— 冷却只看它
+    tencent_ok: usize,
+    /// 腾讯域失败数（美股走 push2delay，不进冷却统计）
+    tencent_fail: usize,
+}
+
 /// 分时刷新。按市场分派数据源：
 /// A 股/指数/港股走腾讯 minute；**美股走东财 trends2**
 /// （实测腾讯 `minute/query?code=usAAPL` 只返回 1 个点，画不出折线）。
 ///
+/// v0.4.0：只刷**传入的这批**（由 [`plan_minute_batch`] 选出），
+/// 每次成功经 `on_success` 回调报给调度方（记账 + 写当日缓存）。
 /// 每个标的独立处理，单标的失败不影响其他标的与后续周期。
 /// 拿不到序列时**不画曲线**（`minute_available = false`），
 /// 绝不用单点/昨收线/插值补假曲线。
 ///
 /// `policy` 每个标的各持一份副本（退避额度不跨标的共享）。
-/// 返回值 = 是否至少一个标的拿到了序列。
 async fn refresh_minutes(
     fetcher: &Fetcher,
     state: &Arc<AppState>,
     items: &[WatchItem],
     policy: Backoff,
-    // 本轮是否包含美股。false 时跳过美股标的（保留它们已有的曲线）。
-    // 详见 `US_MINUTE_EVERY_N_TICKS`：东财按路径限流，美股不能跟着 5s。
-    include_us: bool,
-) -> bool {
-    let mut any_ok = false;
+    mut on_success: impl FnMut(&str, &MinuteSeries),
+) -> MinuteBatchOutcome {
+    let mut out = MinuteBatchOutcome::default();
     for item in items {
-        // 跳过本轮不取的美股。**只是不刷新，不清空** ——
-        // 清掉会让美股曲线每 6 轮闪一下（minute_available 转 false 就不画线）
-        if item.market == Market::Us && !include_us {
-            continue;
-        }
         let mut policy = policy.clone();
         let result = loop {
             let attempt = match item.market {
@@ -563,7 +681,21 @@ async fn refresh_minutes(
                 },
             }
         };
-        any_ok |= result.is_ok();
+
+        // 冷却记账（在动 state 之前完成判定，不依赖快照内容）
+        match &result {
+            Ok(_) => {
+                out.any_ok = true;
+                if item.market != Market::Us {
+                    out.tencent_ok += 1;
+                }
+            }
+            Err(_) => {
+                if item.market != Market::Us {
+                    out.tencent_fail += 1;
+                }
+            }
+        }
 
         let mut snap = state.get();
         if let Some(row) = snap
@@ -574,8 +706,8 @@ async fn refresh_minutes(
             match result {
                 Ok(series) => {
                     if series.points.is_empty() {
-                        // 空序列（盘前 / 全部点落在栅格外）：不画曲线，如实标记
-                        log::debug!("[分时] {} 无可用点位，不绘制曲线", item.tencent_code);
+                        // 空序列（盘前 / 全部点落在栅格外）：不画曲线，如实标记。
+                        // 通道本身是通的（拿到合法响应），对冷却是"成功"
                         row.minute_available = false;
                         row.minute = Some(series);
                     } else {
@@ -585,6 +717,7 @@ async fn refresh_minutes(
                                 row.quote.as_ref().and_then(|q| q.prev_close);
                         }
                         row.minute_available = true;
+                        on_success(&item.tencent_code, &series);
                         row.minute = Some(series);
                     }
                 }
@@ -599,7 +732,41 @@ async fn refresh_minutes(
         }
         state.set(snap);
     }
-    any_ok
+    out
+}
+
+/// 启动时预载当日分时缓存（v0.4.0）：曲线随首屏出现，零网络请求。
+fn preload_minute_cache(state: &Arc<AppState>) {
+    minute_cache::purge_old_days();
+    let cached = minute_cache::load_all_today();
+    apply_minute_cache(state, &cached);
+}
+
+/// 把缓存序列填进快照里**还没有曲线**的行（不覆盖任何已有数据）。
+/// 独立成 pub 供单测；缓存行没有 `last_ok` 记录，首轮自然到期、照常走网络刷新。
+pub fn apply_minute_cache(state: &Arc<AppState>, cached: &[MinuteSeries]) {
+    if cached.is_empty() {
+        return;
+    }
+    let mut snap = state.get();
+    let mut filled = 0usize;
+    for series in cached {
+        if let Some(row) = snap
+            .rows
+            .iter_mut()
+            .find(|r| r.code.eq_ignore_ascii_case(&series.code))
+        {
+            if row.minute.is_none() {
+                row.minute_available = !series.points.is_empty();
+                row.minute = Some(series.clone());
+                filled += 1;
+            }
+        }
+    }
+    if filled > 0 {
+        state.set(snap);
+        log::info!("[分时] 从当日缓存预载 {filled} 条曲线（零网络）");
+    }
 }
 
 async fn fetch_tencent_minute(fetcher: &Fetcher, item: &WatchItem) -> Result<MinuteSeries, String> {
