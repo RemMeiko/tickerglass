@@ -97,7 +97,19 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: TickerGlass ${{ github.ref_name }}
           releaseBody: ${{ steps.body.outputs.body }}
-          # draft: true —— 先发草稿，你在 GitHub 上看一眼产物没问题再点 Publish。
-          # 想完全免手动就改成 false，那样推 tag 后直接公开发布。
-          releaseDraft: true
+          # v0.4.0 起 false：用户 2026-11-18 确认直接公开发布，
+          # 不再停留草稿等手动点 Publish（v0.3.0/v0.3.1 的草稿积压就是这么来的）
+          releaseDraft: false
           prerelease: false
+
+      # 一次性步骤（仅 v0.4.0 这次运行）：把此前积压的两份 Release 草稿转正。
+      # 本机没装 gh CLI 且无 API token，但 Actions 的 GITHUB_TOKEN 对本仓库
+      # 有 contents:write，runner 上预装了 gh —— 借这次发版顺带把历史草稿发布掉。
+      # 之后可以删掉这个 step。
+      - name: Publish legacy drafts (one-time, v0.4.0 only)
+        if: github.ref == 'refs/tags/v0.4.0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit v0.3.0 --repo $env:GITHUB_REPOSITORY --draft=false
+          gh release edit v0.3.1 --repo $env:GITHUB_REPOSITORY --draft=false
